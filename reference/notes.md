@@ -153,3 +153,129 @@ properly, not assumed to already exist:
   CDN. Worth watching (via the Network tab) the first time a real 360M
   load runs, in case HF's server has opinions about many small ranged
   requests in flight.
+
+---
+
+## Status as of 2026-08-27 (session 2, machine with real internet access)
+
+This session ran on a machine that can actually reach `huggingface.co` --
+the blocker the previous session's notes flagged is gone. Two things got
+done: verifying every previously-unverified assumption from Phase 2
+against the real files, and implementing + verifying Phase 5.
+
+### Every open question from the previous session's notes is now resolved
+
+Fetched the real header (`Range: bytes=0-199999`) for both
+`HuggingFaceTB/SmolLM2-135M-Instruct` and `-360M-Instruct`'s
+`model.safetensors` and ran it through the actual `parseHeader` /
+`validateHeader` from `safetensors.js`. All confirmed on the real files,
+not just the synthetic toy one:
+
+- Tensor names match standard HF Llama `state_dict` convention exactly
+  (`model.embed_tokens.weight`, `model.layers.N.self_attn.q_proj.weight`,
+  etc.).
+- The header's dtype string really is `"BF16"`.
+- `lm_head.weight` is genuinely absent from both files (`tie_word_embeddings`
+  holds).
+- The real header is small: 30528 bytes (135M, 272 tensors) and 32664
+  bytes (360M, 290 tensors) -- both comfortably under the 200KB probe, so
+  `needsMoreBytes` never triggers on either real model. It remains
+  unit-test-only unless a much larger model is ever added.
+- `validateHeader()` returns PASS against real `config.json` for both
+  models.
+- HEAD and ranged-GET requests both work fine with CORS
+  (`access-control-allow-origin: *`) and `Accept-Ranges: bytes`, confirming
+  plan.md 25. One difference worth knowing: `resolve/main` now 307s to a
+  Xet-backed CDN URL (`us.aws.cdn.hf.co`, "cas-server.xethub.hf.co") rather
+  than serving directly -- `fetch`'s default redirect-follow handles this
+  transparently, and the final CDN response still carries
+  `content-length`, `accept-ranges: bytes`, and permissive CORS, so nothing
+  in `download.js` needed to change.
+
+### Phase 5 implemented and verified against real golden vectors
+
+Added `js/model/ops.js` (rmsnorm, matvecF32/matvecI8 + a `linear()`
+dispatcher, embedding row lookup, split-half RoPE table
+precompute + apply, softmax, silu) and `js/model/transformer.js` (the full
+per-layer forward pass: RMSNorm -> QKV -> RoPE -> causal GQA attention ->
+o_proj -> residual -> RMSNorm -> SwiGLU MLP -> residual, then final norm +
+tied lm_head). No KV cache yet -- this is a single full-sequence forward
+call over the whole prompt, causal-masked by only attending to `j <= t`
+within the call itself. The cache (and the decode loop that needs it) is
+Phase 6.
+
+`linear()` and `embedRow()` dispatch on the tensor record's `kind` field
+(`'f32'` vs `'i8'`), so the exact same `transformer.js` code will run
+unchanged once Phase 6 switches the loader to `'i8'` -- this was a design
+goal, not an accident.
+
+**Golden vectors were generated for real, on this machine**, closing the
+gap the previous session flagged as needing "a machine with internet
+access":
+
+- `reference/golden/logits_135M.json` and `logits_360M.json`, produced by
+  `transformers` + `torch` (CPU, fp32) for a fixed one-turn prompt ("What
+  is the capital of France?"). Each records the templated prompt text, its
+  exact token ids, and the top-10 logit indices/values at the final
+  position. Generation script is not committed (ad hoc, in this session's
+  scratch dir) -- if regenerating for a different prompt is ever needed,
+  it's a ~15-line `AutoModelForCausalLM` + `apply_chat_template` +
+  `topk(logits[0,-1,:], 10)` script; nothing tricky about it.
+- `tests/golden-forward.mjs` **is** committed and re-runnable
+  (`node tests/golden-forward.mjs [135M|360M]`, needs network access). It
+  loads the real weights straight into memory as f32 (bypassing
+  IndexedDB, which doesn't exist outside a browser -- a small
+  test-local loader duplicating just the fetch/decode half of
+  `loadModelTensors`, not the quantize/store half), asserts the prompt
+  text and token ids from this project's own tokenizer+template match the
+  golden file exactly, runs `transformer.js`'s `forward()`, and checks the
+  top-10 logit ranking is identical with values within 0.05 absolute
+  (actual observed diff: ~1.9e-5 for 135M, ~1.1e-5 for 360M -- both far
+  inside f32 noise, the small residual being summation-order differences
+  between this loop order and PyTorch's).
+- **Result: PASS for both models.** Top-10 token ranking exact, values
+  matching to 5 decimal places. This is plan.md's stated "single most
+  important gate in the project," and it passed on the first real attempt
+  once the header-verification pass above confirmed the loader's
+  assumptions were sound.
+
+### Deviations / things worth knowing
+
+- **The f32 load path is only exercised by `tests/golden-forward.mjs`,
+  not the browser UI.** `main.js` still hardcodes `DTYPE = "i8"` and there
+  is still no button/flag to load f32 in the browser (previous session's
+  notes flagged this as a probable need for Phase 5 -- it turned out not
+  to be necessary because the golden-vector check runs as a Node script
+  against an in-memory loader, not through the app's IndexedDB path).
+  Whether f32 loading ever needs a UI affordance is a call for whoever
+  works on Phase 8 (chat UI) or on int8 accuracy debugging in Phase 6, not
+  before.
+- **`tests/golden-forward.mjs` duplicates a small slice of
+  `loadModelTensors`'s fetch/decode logic** (header probe, per-tensor
+  ranged fetch, bf16 decode) rather than adding a "write to a Map instead
+  of IndexedDB" mode to `safetensors.js` itself. Reasoning: the production
+  loader's job is inseparable from IndexedDB persistence (that's most of
+  what Phase 2 exists to do), and bending it to also support an in-memory
+  test mode would add a branch to production code purely to serve a test.
+  The duplicated slice is ~25 lines and reuses the real `parseHeader` /
+  `decodeBf16` exports rather than reimplementing them, so there's only
+  one place the actual parsing/decoding logic lives.
+- **Python golden-generation environment**: a CPU-only `torch` +
+  `transformers` + `safetensors` venv, created at `C:\tmp_golden_venv`
+  (outside the repo, not committed) specifically because creating it
+  inside the default Windows temp scratch path hit `OSError` from a path
+  length over `MAX_PATH` during `pip install` (a `pkg_resources` test
+  fixture path inside the `torch` wheel is long enough to trip it). Worth
+  remembering if golden vectors ever need regenerating on this machine:
+  use a short venv path, not the deep scratch directory.
+- **Attention here is O(T^2) per layer with no batching** -- for each
+  layer, position `t`'s attention recomputes nothing from prior positions
+  (K/V are stored and reused), but there's a fresh score/softmax/weighted-
+  sum per head per position, matching plan.md's description of Phase 5 as
+  the correctness gate, not a performance target. Measured: 7.5s for the
+  135M's 37-token prompt, 22.4s for the 360M's, single-threaded Node --
+  consistent with plan.md section 3's baseline (that section's numbers are
+  per-token at 1024 ctx; this run is 37 tokens of prefill, so much less
+  total work, but confirms the same order of magnitude). Prefill batching
+  (Phase 7) and the KV cache (Phase 6) are exactly the two optimizations
+  plan.md already earmarks for this.
