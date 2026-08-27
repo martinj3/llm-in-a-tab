@@ -19,8 +19,8 @@
 // WHY THE CAMERA CUTS. The tower is endless -- each token's plates are
 // laid out below the previous token's, separated by a band naming the
 // token that pass emitted -- and the camera only ever moves down it. But
-// it moves in whole plates. It holds on one plate for that plate's entire
-// dwell time and then jumps a full slot, rather than sliding.
+// it moves in whole layers. It holds, then jumps two plates, rather than
+// sliding.
 //
 // This is the second attempt. Falling smoothly was the obvious reading of
 // "descend through the layers", and it is unreadable: everything on screen
@@ -32,6 +32,15 @@
 // and the plate reads as a panel of lights that changes rather than a
 // surface that travels. Motion is reserved for the one thing it is good
 // at: signalling that something happened.
+//
+// A layer and not a plate, because plates alternate ATTN, MLP, ATTN, MLP.
+// Stepping one at a time swaps the type of every plate on screen at every
+// cut -- a tall green neuron grid trades places with a short amber
+// attention matrix, twice per layer -- which flickers worse than the slide
+// it replaced. Stepping two keeps each slot's type fixed, so a cut changes
+// only which layer's numbers are in it. The camera then sits half a slot
+// low (EYE), framing the current layer's attention plate and MLP plate
+// together rather than centring one and demoting the other.
 //
 // The camera still tracks a continuous position internally (camG) -- the
 // pacing controller needs fractions of a plate to chase the worker with --
@@ -70,9 +79,11 @@ import { NEURON_LUT, ATTN_LUT, COLORS } from "./palette.js";
 // a third of the time.
 const GAP = 0;
 // Target time on screen for one plate. The whole pacing scheme exists to
-// hold this roughly constant whatever the model's token rate: at 90-130ms
-// a plate is a thing you see rather than a frame you miss, and the camera
-// moves a legible fraction of the gap between plates each frame.
+// hold this roughly constant whatever the model's token rate. The camera
+// cuts a layer -- two plates -- at a time, so this is half the dwell: the
+// picture holds for 170-330ms across the range of token rates the two
+// models produce, which is long enough to read and short enough to feel
+// like the model is working.
 const PLATE_MS = 110;
 const EDGE_SLICES = 6; // depth of the extruded side face, in layers
 const SLOPE_Y = 0.05; // grid tips down to the right
@@ -306,7 +317,10 @@ export function createStackViz(canvas) {
   }
 
   function prune() {
-    const cutoff = camG - DRAW_SPAN - 1;
+    // Keyed off the *rendered* position, which quantization can leave up to
+    // two plates behind camG. Pruning on camG would drop a frame that is
+    // still on screen.
+    const cutoff = camV - DRAW_SPAN - 1;
     while (frames.length > 1 && frames[0].base + frames[0].count + GAP < cutoff) frames.shift();
     while (frames.length > 8) frames.shift();
   }
@@ -368,10 +382,21 @@ export function createStackViz(canvas) {
     // a screen that is empty below the middle.
     camG = Math.min(camG + speed * dt, Math.max(maxG - 0.85, frames[0].base));
     // The cut. Everything above tracks a continuous position, and this is
-    // the one place it becomes discrete: the view holds on a plate for the
-    // whole of that plate's dwell time and then jumps a full slot, so the
-    // next layer lands its cells on exactly the pixels the last one used.
-    camV = Math.floor(camG);
+    // the one place it becomes discrete.
+    //
+    // Quantized to a whole *layer*, not a whole plate. Plates alternate
+    // ATTN, MLP, ATTN, MLP, so cutting a single plate at a time swaps the
+    // type of everything on screen at every cut -- a tall green neuron grid
+    // becomes a short amber attention matrix and back, twice a layer. That
+    // is not a panel of lights changing, it is two different panels
+    // trading places, and it flickers worse than the slide it replaced.
+    //
+    // Stepping two plates keeps every slot's type fixed: the slot at the
+    // centre is always that layer's attention matrix, the one below it is
+    // always its MLP, and a cut changes only which layer's numbers are in
+    // them. Runs are a whole number of layers and always start on an even
+    // plate (see runLength), so this parity holds for every frame.
+    camV = Math.floor(camG / 2) * 2;
     prune();
   }
 
@@ -891,7 +916,7 @@ export function createStackViz(canvas) {
   // layer from its mean activation energy, with a caret at the camera.
   // Instrumentation, and the only place the full shape of the model is
   // visible at once while the camera is inside it.
-  function drawRail(frame, activeLayer, activeIsAttn, alpha) {
+  function drawRail(frame, activeLayer, alpha) {
     if (!frame) return;
     const x = compact ? 13 : 24;
     const top = Hpx * 0.17;
@@ -911,9 +936,10 @@ export function createStackViz(canvas) {
       const e = clamp(frame.energy[l] * 3.2, 0.06, 1);
       const here = l === activeLayer;
       ctx.globalAlpha = alpha * (here ? 1 : 0.4 + 0.6 * e);
-      // The caret takes the colour of the plate the camera is on, so the
-      // rail says which half of the block is being drawn as well as where.
-      ctx.strokeStyle = here ? (activeIsAttn ? COLORS.attnFrame : COLORS.gold) : COLORS.frame;
+      // One caret, not one per plate: the camera now frames a whole layer
+      // at a time, so both halves of the block are always on screen and
+      // "which half is being drawn" has stopped being a question.
+      ctx.strokeStyle = here ? COLORS.gold : COLORS.frame;
       ctx.lineWidth = here ? 2.5 : 1.4;
       ctx.beginPath();
       ctx.moveTo(x - (here ? 8 : 3), y);
@@ -983,29 +1009,38 @@ export function createStackViz(canvas) {
     const mlpH = (plateWidth() / grid.w) * grid.h;
     const attnH = cfg.heads * (compact ? ATTN_ROW_PX_COMPACT : ATTN_ROW_PX);
     const spacing = Math.max(((mlpH + attnH) / 2) * 2.05, Hpx * 0.26);
-    const centre = camV;
+    // The camera sits half a slot below the plate it is "on", so the two
+    // plates of the current layer straddle the middle of the screen -- its
+    // attention matrix just above, its MLP just below -- instead of one of
+    // them being centred and the other pushed to a neighbour's depth. The
+    // unit the camera moves in is a layer, so the unit it frames should be
+    // a layer too, and both halves want to be readable at once.
+    const EYE = 0.5;
 
     // Mildly perspective rather than linear in z: distance compresses, so
     // the tower recedes into the top and bottom of the frame instead of
     // the third plate simply being off screen.
     const yOf = (z) => cy + spacing * (z / (1 + Math.abs(z) * 0.28));
 
-    // Farthest first, so nearer plates overlay them.
+    // Farthest first, so nearer plates overlay them. Asymmetric by one
+    // because the eye is offset by half a slot: the extra plate is on the
+    // side the camera is leaning toward.
     const order = [];
-    for (let d = -DRAW_SPAN; d <= DRAW_SPAN; d++) order.push(centre + d);
-    order.sort((p, q) => Math.abs(q - camV) - Math.abs(p - camV));
+    for (let d = -DRAW_SPAN; d <= DRAW_SPAN + 1; d++) order.push(camV + d);
+    order.sort((p, q) => Math.abs(q - camV - EYE) - Math.abs(p - camV - EYE));
 
     let activeFrame = null;
     let activeLayer = 0;
-    let activeIsAttn = false;
 
     for (const g of order) {
       if (g < 0) continue;
-      // Integer by construction now, so a plate's transform is bit-identical
-      // from one cut to the next and the cells of successive layers land on
-      // the same pixels: the plate stops being a thing sliding past and
-      // becomes a panel of lights that changes.
-      const z = g - camV;
+      // Fixed by construction now -- an integer offset by the constant EYE
+      // -- so a plate's transform is bit-identical from one cut to the next
+      // *and* the plate that lands in this slot is always the same type.
+      // Successive layers put their cells on exactly the same pixels: the
+      // plate stops being a thing sliding past and becomes a panel of
+      // lights that changes.
+      const z = g - camV - EYE;
       const az = Math.abs(z);
       const s = 1 / (1 + az * 0.34);
       const a = clamp(1.15 - az * 0.3, 0, 1) * fade;
@@ -1024,15 +1059,16 @@ export function createStackViz(canvas) {
       // first plate. Nudged past the midpoint so it reads as belonging to
       // the run above it rather than floating between two.
       if (at.last) drawTokenBand(at.frame, y + (yOf(z + 1) - y) * 0.55, a);
-      if (az < 0.5) {
+      // Both centre plates sit at az === EYE and belong to the same layer,
+      // so either one names it.
+      if (az <= EYE) {
         activeFrame = at.frame;
         activeLayer = layer;
-        activeIsAttn = isAttn;
       }
     }
 
     flushLabel();
-    drawRail(activeFrame || frames[frames.length - 1], activeLayer, activeIsAttn, fade * 0.85);
+    drawRail(activeFrame || frames[frames.length - 1], activeLayer, fade * 0.85);
   }
 
   // ------------------------------- loop ---------------------------------

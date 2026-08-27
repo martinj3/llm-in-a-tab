@@ -684,11 +684,44 @@ to do the one thing it is good at: signalling that something happened.
 
 `camG` stays continuous -- the pacing controller chases the worker in
 fractions of a plate and would judder if quantized -- so the quantization
-is one `Math.floor` at the very end of `step()`, not a change to the
-pacing model. Worth knowing if this is ever revisited: the dwell per plate
-is then whatever `PLATE_MS` and the measured token rate produce, and at
-16ms render frames that is 4-10 identical frames per plate, which the
-harness can assert on directly by hashing the canvas.
+is one line at the very end of `step()`, not a change to the pacing model.
+
+**The step has to be a whole layer, not a whole plate, and this is the
+part that is easy to get wrong.** Quantizing to a single plate is the
+obvious move and it made things *worse* than the slide had been. Plates
+alternate ATTN, MLP, ATTN, MLP, so stepping one at a time swaps the type
+of every plate on screen at every cut: a 250px green neuron grid trades
+places with a 135px amber attention matrix, twice per layer, ~110ms
+apart. Nothing holds still, and now it strobes as well. The lesson
+generalizes -- cutting only buys you stillness if the thing that lands in
+a slot is the same *kind* of thing as what left it.
+
+Stepping two plates fixes it because runs are always a whole number of
+layers and always begin on an even plate (`runLength` rounds down to even,
+`GAP` is 0, so `base` and `start` stay even and plate parity equals slot
+parity globally). Every slot then has a fixed type forever. Given that,
+the camera also sits half a slot low (`EYE = 0.5`) so the current layer's
+attention plate and MLP plate straddle the middle of the screen at equal
+scale, rather than one being centred and the other demoted to a
+neighbour's depth -- the camera moves in layers, so it should frame a
+layer. The rail's caret lost its ATTN/MLP colour at the same time: both
+halves of the block are now always on screen, so "which half is being
+drawn" stopped being a question.
+
+Dwell is two plates, so 170-330ms across both models' token rates.
+
+*Verifying it.* Two things, both in `tests/viz-harness.html`. Hashing the
+canvas every 16ms gives runs of ~14-16 identical frames, i.e. the picture
+genuinely holds and then jumps. And two captures a cut apart, diffed by
+eye, must have every plate outline, label, and token band at *identical*
+pixel positions with only the contents different -- L16 and L19 of the
+same dump, same rectangles. That second check is the one that would have
+caught the single-plate version immediately.
+
+Gotcha while capturing: `resize_window` in the pane clears the canvas
+(`resize()` assigns `canvas.width`), and the harness stubs out `rAF`, so
+nothing redraws until you step again. Resize first, then step, then shoot
+-- otherwise you screenshot a blank canvas and think the renderer broke.
 
 **Three things had to be measured rather than guessed.**
 
