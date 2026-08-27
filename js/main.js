@@ -2,6 +2,8 @@ import { MODELS } from "./models.js";
 import { fetchModelConfig } from "./model/config.js";
 import { loadModelTensors } from "./model/safetensors.js";
 import { getTensor } from "./model/store.js";
+import { loadTokenizer } from "./model/tokenizer.js";
+import { renderChatPrompt, encodeChatPrompt } from "./model/template.js";
 
 const DTYPE = "i8";
 
@@ -117,6 +119,17 @@ async function handleDownload(modelId) {
     }
 
     await logWeightHistogram(modelId, DTYPE);
+
+    setStatus(`Loading tokenizer for ${model.label}...`);
+    const tokenizer = await loadTokenizer(modelId);
+    log(`Tokenizer loaded: ${tokenizer.tokenToId.size} vocab entries.`);
+
+    const sampleMessages = [{ role: "user", content: "Hello!" }];
+    const promptText = renderChatPrompt(sampleMessages, true);
+    const promptIds = encodeChatPrompt(tokenizer, sampleMessages, true);
+    log(`Sample chat prompt (${promptIds.length} tokens): ${JSON.stringify(promptText)}`);
+    log(`Round-trip decode: ${JSON.stringify(tokenizer.decode(promptIds))}`);
+
     setStatus(`${model.label} ready.`);
   } catch (err) {
     console.error(err);

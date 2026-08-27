@@ -1,0 +1,396 @@
+{
+  "source": "jinja2 rendering of tokenizer_config.json's chat_template (135M, byte-identical to 360M)",
+  "chat_template": "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "cases": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello!"
+        }
+      ],
+      "add_generation_prompt": true,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        19556,
+        17,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello!"
+        }
+      ],
+      "add_generation_prompt": false,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello!<|im_end|>\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        19556,
+        17,
+        2,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "add_generation_prompt": true,
+      "rendered": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        1733,
+        313,
+        30,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        26843,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "add_generation_prompt": false,
+      "rendered": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        1733,
+        313,
+        30,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        26843,
+        2,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2+2?"
+        },
+        {
+          "role": "assistant",
+          "content": "4."
+        },
+        {
+          "role": "user",
+          "content": "And 3+3?"
+        }
+      ],
+      "add_generation_prompt": true,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n4.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        1780,
+        314,
+        216,
+        34,
+        27,
+        34,
+        47,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198,
+        36,
+        30,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        3528,
+        216,
+        35,
+        27,
+        35,
+        47,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is 2+2?"
+        },
+        {
+          "role": "assistant",
+          "content": "4."
+        },
+        {
+          "role": "user",
+          "content": "And 3+3?"
+        }
+      ],
+      "add_generation_prompt": false,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n4.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        1780,
+        314,
+        216,
+        34,
+        27,
+        34,
+        47,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198,
+        36,
+        30,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        3528,
+        216,
+        35,
+        27,
+        35,
+        47,
+        2,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Multi\nline\ncontent"
+        }
+      ],
+      "add_generation_prompt": true,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nMulti\nline\ncontent<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        25673,
+        198,
+        1311,
+        198,
+        7070,
+        2,
+        198,
+        1,
+        520,
+        9531,
+        198
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Multi\nline\ncontent"
+        }
+      ],
+      "add_generation_prompt": false,
+      "rendered": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nMulti\nline\ncontent<|im_end|>\n",
+      "ids": [
+        1,
+        9690,
+        198,
+        2683,
+        359,
+        253,
+        5356,
+        5646,
+        11173,
+        3365,
+        3511,
+        308,
+        34519,
+        28,
+        7018,
+        411,
+        407,
+        19712,
+        8182,
+        2,
+        198,
+        1,
+        4093,
+        198,
+        25673,
+        198,
+        1311,
+        198,
+        7070,
+        2,
+        198
+      ]
+    }
+  ]
+}

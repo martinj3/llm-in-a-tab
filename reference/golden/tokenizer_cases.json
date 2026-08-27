@@ -1,0 +1,503 @@
+{
+  "source": "tokenizers library, tokenizer.json (135M, byte-identical to 360M)",
+  "cases": [
+    {
+      "text": "",
+      "ids": [],
+      "tokens": [],
+      "decoded": ""
+    },
+    {
+      "text": "Hello, world!",
+      "ids": [
+        19556,
+        28,
+        905,
+        17
+      ],
+      "tokens": [
+        "Hello",
+        ",",
+        "Ġworld",
+        "!"
+      ],
+      "decoded": "Hello, world!"
+    },
+    {
+      "text": "The year is 2026 and the price is $19.99.",
+      "ids": [
+        504,
+        713,
+        314,
+        216,
+        34,
+        32,
+        34,
+        38,
+        284,
+        260,
+        4319,
+        314,
+        1885,
+        33,
+        41,
+        30,
+        41,
+        41,
+        30
+      ],
+      "tokens": [
+        "The",
+        "Ġyear",
+        "Ġis",
+        "Ġ",
+        "2",
+        "0",
+        "2",
+        "6",
+        "Ġand",
+        "Ġthe",
+        "Ġprice",
+        "Ġis",
+        "Ġ$",
+        "1",
+        "9",
+        ".",
+        "9",
+        "9",
+        "."
+      ],
+      "decoded": "The year is 2026 and the price is $19.99."
+    },
+    {
+      "text": "leading and trailing spaces   ",
+      "ids": [
+        15957,
+        284,
+        35079,
+        5600,
+        333
+      ],
+      "tokens": [
+        "leading",
+        "Ġand",
+        "Ġtrailing",
+        "Ġspaces",
+        "ĠĠĠ"
+      ],
+      "decoded": "leading and trailing spaces   "
+    },
+    {
+      "text": "   leading and trailing spaces",
+      "ids": [
+        256,
+        2899,
+        284,
+        35079,
+        5600
+      ],
+      "tokens": [
+        "ĠĠ",
+        "Ġleading",
+        "Ġand",
+        "Ġtrailing",
+        "Ġspaces"
+      ],
+      "decoded": "   leading and trailing spaces"
+    },
+    {
+      "text": "emoji test 😀🚀",
+      "ids": [
+        391,
+        33777,
+        1028,
+        40303,
+        218,
+        10813,
+        244,
+        218
+      ],
+      "tokens": [
+        "em",
+        "oji",
+        "Ġtest",
+        "ĠðŁĺ",
+        "Ģ",
+        "ðŁ",
+        "ļ",
+        "Ģ"
+      ],
+      "decoded": "emoji test 😀🚀"
+    },
+    {
+      "text": "<|im_start|>system",
+      "ids": [
+        1,
+        9690
+      ],
+      "tokens": [
+        "<|im_start|>",
+        "system"
+      ],
+      "decoded": "<|im_start|>system"
+    },
+    {
+      "text": "Numbers: 0 1 42 100 3.14 -7",
+      "ids": [
+        39006,
+        42,
+        216,
+        32,
+        216,
+        33,
+        216,
+        36,
+        34,
+        216,
+        33,
+        32,
+        32,
+        216,
+        35,
+        30,
+        33,
+        36,
+        731,
+        39
+      ],
+      "tokens": [
+        "Numbers",
+        ":",
+        "Ġ",
+        "0",
+        "Ġ",
+        "1",
+        "Ġ",
+        "4",
+        "2",
+        "Ġ",
+        "1",
+        "0",
+        "0",
+        "Ġ",
+        "3",
+        ".",
+        "1",
+        "4",
+        "Ġ-",
+        "7"
+      ],
+      "decoded": "Numbers: 0 1 42 100 3.14 -7"
+    },
+    {
+      "text": "Tabs\tand\nnewlines",
+      "ids": [
+        68,
+        7366,
+        197,
+        397,
+        198,
+        2241,
+        5110
+      ],
+      "tokens": [
+        "T",
+        "abs",
+        "ĉ",
+        "and",
+        "Ċ",
+        "new",
+        "lines"
+      ],
+      "decoded": "Tabs\tand\nnewlines"
+    },
+    {
+      "text": "unicode: café naïve résumé",
+      "ids": [
+        35852,
+        42,
+        37366,
+        15486,
+        46494,
+        412,
+        2756,
+        5422,
+        2756
+      ],
+      "tokens": [
+        "unicode",
+        ":",
+        "ĠcafÃ©",
+        "Ġna",
+        "Ã¯ve",
+        "Ġr",
+        "Ã©",
+        "sum",
+        "Ã©"
+      ],
+      "decoded": "unicode: café naïve résumé"
+    },
+    {
+      "text": "multiple   spaces   between words",
+      "ids": [
+        30404,
+        256,
+        5600,
+        256,
+        826,
+        1924
+      ],
+      "tokens": [
+        "multiple",
+        "ĠĠ",
+        "Ġspaces",
+        "ĠĠ",
+        "Ġbetween",
+        "Ġwords"
+      ],
+      "decoded": "multiple   spaces   between words"
+    },
+    {
+      "text": "text<|im_end|>more text",
+      "ids": [
+        2692,
+        2,
+        3143,
+        1694
+      ],
+      "tokens": [
+        "text",
+        "<|im_end|>",
+        "more",
+        "Ġtext"
+      ],
+      "decoded": "text<|im_end|>more text"
+    },
+    {
+      "text": "<|im_start|><|im_end|>",
+      "ids": [
+        1,
+        2
+      ],
+      "tokens": [
+        "<|im_start|>",
+        "<|im_end|>"
+      ],
+      "decoded": "<|im_start|><|im_end|>"
+    },
+    {
+      "text": "partial <|im_star match",
+      "ids": [
+        24975,
+        2067,
+        108,
+        306,
+        79,
+        16079,
+        5758
+      ],
+      "tokens": [
+        "partial",
+        "Ġ<",
+        "|",
+        "im",
+        "_",
+        "star",
+        "Ġmatch"
+      ],
+      "decoded": "partial <|im_star match"
+    },
+    {
+      "text": "single a",
+      "ids": [
+        18536,
+        253
+      ],
+      "tokens": [
+        "single",
+        "Ġa"
+      ],
+      "decoded": "single a"
+    },
+    {
+      "text": "999999999999",
+      "ids": [
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41,
+        41
+      ],
+      "tokens": [
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9",
+        "9"
+      ],
+      "decoded": "999999999999"
+    },
+    {
+      "text": "-42",
+      "ids": [
+        29,
+        36,
+        34
+      ],
+      "tokens": [
+        "-",
+        "4",
+        "2"
+      ],
+      "decoded": "-42"
+    },
+    {
+      "text": "3.14159",
+      "ids": [
+        35,
+        30,
+        33,
+        36,
+        33,
+        37,
+        41
+      ],
+      "tokens": [
+        "3",
+        ".",
+        "1",
+        "4",
+        "1",
+        "5",
+        "9"
+      ],
+      "decoded": "3.14159"
+    },
+    {
+      "text": "CamelCase and snake_case and kebab-case",
+      "ids": [
+        51,
+        14548,
+        10802,
+        284,
+        14321,
+        79,
+        7544,
+        284,
+        902,
+        82,
+        369,
+        29,
+        7544
+      ],
+      "tokens": [
+        "C",
+        "amel",
+        "Case",
+        "Ġand",
+        "Ġsnake",
+        "_",
+        "case",
+        "Ġand",
+        "Ġke",
+        "b",
+        "ab",
+        "-",
+        "case"
+      ],
+      "decoded": "CamelCase and snake_case and kebab-case"
+    },
+    {
+      "text": "  ",
+      "ids": [
+        256
+      ],
+      "tokens": [
+        "ĠĠ"
+      ],
+      "decoded": "  "
+    },
+    {
+      "text": "\n\n\n",
+      "ids": [
+        16506
+      ],
+      "tokens": [
+        "ĊĊĊ"
+      ],
+      "decoded": "\n\n\n"
+    },
+    {
+      "text": "contractions: don't can't I'll we've",
+      "ids": [
+        26169,
+        438,
+        42,
+        1326,
+        982,
+        416,
+        982,
+        339,
+        3060,
+        392,
+        3543
+      ],
+      "tokens": [
+        "contract",
+        "ions",
+        ":",
+        "Ġdon",
+        "'t",
+        "Ġcan",
+        "'t",
+        "ĠI",
+        "'ll",
+        "Ġwe",
+        "'ve"
+      ],
+      "decoded": "contractions: don't can't I'll we've"
+    },
+    {
+      "text": "Hello, world! <|im_start|>user\nHi<|im_end|>",
+      "ids": [
+        19556,
+        28,
+        905,
+        17,
+        216,
+        1,
+        4093,
+        198,
+        26843,
+        2
+      ],
+      "tokens": [
+        "Hello",
+        ",",
+        "Ġworld",
+        "!",
+        "Ġ",
+        "<|im_start|>",
+        "user",
+        "Ċ",
+        "Hi",
+        "<|im_end|>"
+      ],
+      "decoded": "Hello, world! <|im_start|>user\nHi<|im_end|>"
+    }
+  ]
+}
