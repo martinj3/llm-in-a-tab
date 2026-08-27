@@ -9,6 +9,11 @@ pick clearer. When it is between "clever" and "debuggable", pick debuggable.
 Several decisions below deliberately reject the more efficient option because the
 efficient option obscures the thing we are trying to learn.
 
+**Before continuing work, also read `reference/notes.md`.** This document
+is the design intent; notes.md is the running log of what has actually
+been done, how it was verified, and anywhere real-world results diverged
+from this plan. Update it as work continues.
+
 ---
 
 ## 0. Constraints
