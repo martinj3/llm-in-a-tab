@@ -64,7 +64,15 @@ body {
   transition: opacity 600ms ease;
 }
 
-.screen[hidden] { display: none; }
+/* The !important is load-bearing, not laziness. Both screens are
+   position:fixed covering the viewport, and #chat is styled by an ID
+   selector below (`#chat { display: flex }`) which outranks this
+   attribute selector on specificity. Without it the chat screen never
+   actually hides -- and because every one of its backgrounds is
+   transparent, it becomes an invisible sheet of glass over the landing
+   page that shows its HUD and composer and swallows every click,
+   including the download buttons. */
+.screen[hidden] { display: none !important; }
 .screen.fading { opacity: 0; pointer-events: none; }
 .screen.entering { opacity: 0; }
 

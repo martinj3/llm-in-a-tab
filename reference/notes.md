@@ -605,3 +605,43 @@ restyling, which is what it was built for.
   math is model-agnostic and driven entirely by `config.json`, and
   nothing in Phase 8 touches it. Phase 9 will exercise 360M on real
   hardware.
+
+### Post-Phase-8 fix: the invisible chat screen (found on GitHub Pages)
+
+Shipped Phase 8 had a bug that made the landing page's download buttons
+completely inert, and showed the chat HUD and composer on top of the
+landing page. One cause, two symptoms:
+
+```css
+.screen[hidden] { display: none; }   /* specificity 0,0,2,0 */
+#chat { display: flex; ... }         /* specificity 0,1,0,0  -- wins */
+```
+
+An ID selector outranks an attribute selector, so `#chat` was never
+actually hidden by its `hidden` attribute. Because it is
+`position: fixed; inset: 0` and *every one of its backgrounds is
+transparent by design*, it rendered as an invisible full-viewport sheet
+of glass over the landing page: its HUD and composer showed, and it
+swallowed every click before it could reach the buttons underneath.
+`#landing` had the same problem in the other direction -- it stayed in
+the layout after entering chat, saved only by `.fading`'s `opacity: 0`
+and `pointer-events: none`.
+
+Fixed with `display: none !important` on `.screen[hidden]`, which is
+load-bearing here rather than laziness -- there is no way for an
+attribute selector to outrank an ID selector otherwise, short of giving
+the screens classes instead of IDs.
+
+**Why the Phase 8 testing missed it, which is the more useful lesson.**
+Every browser check in that phase drove the UI with `element.click()`
+from `javascript_tool`, which dispatches straight to the target and
+bypasses hit-testing entirely. The one real coordinate click that *was*
+attempted did nothing, and that was written off as the browser pane not
+compositing. A transparent overlay is invisible to `.click()`, invisible
+to `read_page` (the accessibility tree shows both screens regardless),
+and invisible to computed-style spot checks of individual elements --
+but it is the first thing a human finds. The check that would have
+caught it is `document.elementFromPoint()` on a control's own center,
+asserting the element returned *is* that control; that is now how the
+overlay behaviour is verified, since it works without a compositing
+pane.
