@@ -7,25 +7,88 @@
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <main>
-    <h1>llm-in-a-tab</h1>
-    <p class="subtitle">A transformer running in pure JavaScript, entirely in this browser tab.</p>
+  <!-- The chat screen's own background is transparent all the way down to
+       <body>, so a visualization can later be dropped in behind it
+       without restyling anything. -->
+  <div class="scanlines" aria-hidden="true"></div>
 
-    <div class="model-buttons">
-      <button id="download-135m" data-model="135M">Download 135M</button>
-      <button id="download-360m" data-model="360M">Download 360M</button>
+  <!-- ------------------------------- LANDING ------------------------------ -->
+  <section id="landing" class="screen">
+    <header class="landing-head">
+      <h1>llm&#8203;-in-a-&#8203;tab<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="subtitle">A transformer written from scratch in plain JavaScript,
+        running entirely in this browser tab. No server, no WASM, no GPU.</p>
+    </header>
+
+    <div class="model-grid">
+      <fieldset class="model-panel" id="panel-135M" data-model="135M">
+        <legend>SmolLM2-135M-Instruct</legend>
+        <dl class="specs">
+          <div><dt>params</dt><dd>135 M</dd></div>
+          <div><dt>layers</dt><dd>30</dd></div>
+          <div><dt>download</dt><dd>269 MB</dd></div>
+          <div><dt>in tab</dt><dd>~135 MB int8</dd></div>
+        </dl>
+        <p class="panel-note">Recommended. Runs on phones.</p>
+        <div class="panel-progress" hidden>
+          <div class="bar"><span></span></div>
+          <span class="bar-label"></span>
+        </div>
+        <p class="panel-status">Not downloaded.</p>
+        <button class="panel-action" type="button">Download</button>
+      </fieldset>
+
+      <fieldset class="model-panel" id="panel-360M" data-model="360M">
+        <legend>SmolLM2-360M-Instruct</legend>
+        <dl class="specs">
+          <div><dt>params</dt><dd>362 M</dd></div>
+          <div><dt>layers</dt><dd>32</dd></div>
+          <div><dt>download</dt><dd>723 MB</dd></div>
+          <div><dt>in tab</dt><dd>~360 MB int8</dd></div>
+        </dl>
+        <p class="panel-note">Desktop. Slower, noticeably better.</p>
+        <div class="panel-progress" hidden>
+          <div class="bar"><span></span></div>
+          <span class="bar-label"></span>
+        </div>
+        <p class="panel-status">Not downloaded.</p>
+        <button class="panel-action" type="button">Download</button>
+      </fieldset>
     </div>
 
-    <div class="progress-wrap" id="progress-wrap" hidden>
-      <progress id="progress-bar" max="100" value="0"></progress>
-      <span id="progress-label"></span>
-    </div>
-
-    <div class="status">
-      <div id="status-line">Idle.</div>
+    <details class="console">
+      <summary>console</summary>
       <pre id="log"></pre>
+    </details>
+  </section>
+
+  <!-- -------------------------------- CHAT -------------------------------- -->
+  <section id="chat" class="screen" hidden>
+    <div class="hud">
+      <span id="hud-model">--</span>
+      <span id="hud-ctx">ctx --/--</span>
+      <span id="hud-speed">-- tok/s</span>
+      <span id="hud-prefill">prefill --</span>
+      <span id="hud-mem">mem --</span>
     </div>
-  </main>
+
+    <div class="transcript" id="transcript" role="log" aria-live="polite"></div>
+
+    <form class="composer" id="composer">
+      <div class="sampling">
+        <label><input type="checkbox" id="greedy" checked> greedy</label>
+        <label>temp <input type="range" id="temperature" min="0.1" max="1.5" step="0.05" value="0.7" disabled>
+          <output id="temperature-out">0.70</output></label>
+        <label>top-p <input type="range" id="top-p" min="0.1" max="1" step="0.05" value="0.9" disabled>
+          <output id="top-p-out">0.90</output></label>
+      </div>
+      <div class="composer-row">
+        <textarea id="input" rows="1" placeholder="Say something..." autocomplete="off"></textarea>
+        <button type="submit" id="send">Send</button>
+        <button type="button" id="stop" hidden>Stop</button>
+      </div>
+    </form>
+  </section>
 
   <script type="module" src="js/main.js"></script>
 </body>

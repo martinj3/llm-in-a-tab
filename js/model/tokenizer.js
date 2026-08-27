@@ -160,13 +160,43 @@ export class Tokenizer {
   }
 
   decode(ids) {
+    return new TextDecoder().decode(this.tokenBytes(ids));
+  }
+
+  // The raw bytes a token id stands for, undoing bytesToUnicode.
+  tokenBytes(ids) {
     const bytes = [];
     for (const id of ids) {
       const token = this.idToToken.get(id);
       if (token === undefined) throw new Error(`Unknown token id ${id}`);
       for (const ch of token) bytes.push(this.charToByte.get(ch));
     }
-    return new TextDecoder().decode(new Uint8Array(bytes));
+    return new Uint8Array(bytes);
+  }
+}
+
+// Incremental decoder for streaming generation to the DOM one token at a
+// time. A single token's bytes are frequently *part* of a UTF-8 sequence
+// -- byte-level BPE happily splits an emoji or an accented letter across
+// two or three tokens -- so decoding each token on its own would emit a
+// U+FFFD replacement character and then a second one, permanently
+// corrupting the text. TextDecoder's `stream: true` mode exists precisely
+// for this: it holds an incomplete trailing sequence back until the
+// continuation bytes arrive, so `push()` returns "" for a partial token
+// and the whole character when it completes. Call flush() at the end of a
+// message to surrender anything still buffered.
+export class StreamDecoder {
+  constructor(tokenizer) {
+    this.tokenizer = tokenizer;
+    this.decoder = new TextDecoder();
+  }
+
+  push(id) {
+    return this.decoder.decode(this.tokenizer.tokenBytes([id]), { stream: true });
+  }
+
+  flush() {
+    return this.decoder.decode();
   }
 }
 

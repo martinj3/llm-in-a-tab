@@ -1,95 +1,352 @@
-:root {
-  color-scheme: light dark;
-  --fg: #1a1a1a;
-  --bg: #fafafa;
-  --border: #ccc;
-  --accent: #2a6df5;
-}
+/* 1980s terminal styling: phosphor green on black, monospace everywhere,
+   a block cursor, and faint scanlines.
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fg: #e8e8e8;
-    --bg: #181818;
-    --border: #444;
-  }
+   The typeface is a system monospace stack rather than a webfont on
+   purpose. plan.md's zero-dependency rule is about inference, but the
+   same reasoning applies here: a Google Fonts <link> would be a
+   third-party request on every page load for a project whose entire
+   premise is that nothing leaves the tab except the model weights. Every
+   platform ships something with the right character. */
+
+:root {
+  --bg: #06080a;
+  --fg: #e6f2e6;          /* body text: white-ish, easier to read at length */
+  --phosphor: #4bf07a;    /* accents, labels, chrome */
+  --phosphor-dim: #2a8f4a;
+  --amber: #ffb454;       /* warnings, stop states */
+  --bubble-user: rgba(75, 240, 122, 0.13);
+  --bubble-ai: rgba(200, 220, 210, 0.09);
+  --rule: rgba(75, 240, 122, 0.28);
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Menlo, Consolas,
+          "DejaVu Sans Mono", "Liberation Mono", monospace;
 }
 
 * { box-sizing: border-box; }
 
+html, body { height: 100%; }
+
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1.5;
   color: var(--fg);
+  /* The only opaque background in the document. Everything above it --
+     the chat screen included -- is transparent, so dropping a canvas in
+     here later needs no other change. */
   background: var(--bg);
+  overflow: hidden;
 }
 
-main {
-  max-width: 640px;
-  margin: 0 auto;
-  padding: 2rem 1rem 4rem;
+/* Faint horizontal scanlines over the whole document. pointer-events:none
+   so it never intercepts a click. */
+.scanlines {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.22) 3px,
+    rgba(0, 0, 0, 0.22) 4px
+  );
 }
+
+/* Both screens stack in the same place; only opacity/visibility differ,
+   which is what makes the landing -> chat handoff a cross-fade rather
+   than a layout jump. */
+.screen {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  transition: opacity 600ms ease;
+}
+
+.screen[hidden] { display: none; }
+.screen.fading { opacity: 0; pointer-events: none; }
+.screen.entering { opacity: 0; }
+
+/* ------------------------------- LANDING ------------------------------- */
+
+#landing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: clamp(1.5rem, 6vh, 4rem) 1rem 2rem;
+}
+
+.landing-head { max-width: 42rem; text-align: center; }
 
 h1 {
-  margin-bottom: 0.25rem;
+  margin: 0;
+  font-size: clamp(1.6rem, 6vw, 2.6rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--phosphor);
+  text-shadow: 0 0 12px rgba(75, 240, 122, 0.45);
+}
+
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.15em;
+  vertical-align: -0.12em;
+  background: var(--phosphor);
+  animation: blink 1.06s step-end infinite;
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor { animation: none; }
+  .screen { transition: none; }
 }
 
 .subtitle {
-  margin-top: 0;
-  opacity: 0.75;
+  margin: 0.9rem 0 0;
+  color: var(--phosphor-dim);
+  font-size: 0.85rem;
 }
 
-.model-buttons {
-  display: flex;
-  gap: 0.75rem;
-  margin: 1.5rem 0;
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1.25rem;
+  width: 100%;
+  max-width: 46rem;
+  margin: 2.5rem 0 1.5rem;
 }
+
+.model-panel {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0.5rem 1.1rem 1.1rem;
+  border: 1px solid var(--rule);
+  background: rgba(75, 240, 122, 0.03);
+}
+
+.model-panel legend {
+  padding: 0 0.5rem;
+  color: var(--phosphor);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.model-panel[data-state="active"] {
+  border-color: var(--phosphor);
+  box-shadow: 0 0 18px rgba(75, 240, 122, 0.18);
+}
+
+.model-panel[data-disabled="true"] { opacity: 0.4; }
+
+.specs { margin: 0.4rem 0 0.8rem; font-size: 0.78rem; }
+.specs > div { display: flex; justify-content: space-between; gap: 1rem; }
+.specs dt { color: var(--phosphor-dim); }
+.specs dd { margin: 0; }
+
+.panel-note {
+  margin: 0 0 0.9rem;
+  font-size: 0.75rem;
+  color: var(--phosphor-dim);
+}
+
+.panel-status {
+  margin: 0 0 0.8rem;
+  min-height: 2.4em;
+  font-size: 0.75rem;
+  color: var(--fg);
+}
+
+.panel-status.error { color: var(--amber); }
+
+.panel-progress { margin-bottom: 0.7rem; font-size: 0.72rem; }
+
+.bar {
+  height: 0.6rem;
+  border: 1px solid var(--rule);
+  margin-bottom: 0.3rem;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--phosphor);
+  transition: width 120ms linear;
+}
+
+.bar-label { color: var(--phosphor-dim); }
 
 button {
-  font-size: 1rem;
-  padding: 0.6rem 1.2rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--accent);
-  color: white;
+  font-family: inherit;
+  font-size: 0.82rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.6rem 1rem;
+  color: var(--bg);
+  background: var(--phosphor);
+  border: 1px solid var(--phosphor);
   cursor: pointer;
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+button:hover:not(:disabled) { box-shadow: 0 0 14px rgba(75, 240, 122, 0.5); }
+button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.panel-action { margin-top: auto; }
+.panel-action[data-role="chat"] { animation: pulse 2.2s ease-in-out infinite; }
+
+@keyframes pulse {
+  50% { box-shadow: 0 0 22px rgba(75, 240, 122, 0.65); }
 }
 
-.progress-wrap {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin: 1rem 0;
+@media (prefers-reduced-motion: reduce) {
+  .panel-action[data-role="chat"] { animation: none; }
 }
 
-progress {
-  flex: 1;
-  height: 1rem;
+.console {
+  width: 100%;
+  max-width: 46rem;
+  font-size: 0.72rem;
+  color: var(--phosphor-dim);
 }
 
-.status {
-  margin-top: 1.5rem;
-  border-top: 1px solid var(--border);
-  padding-top: 1rem;
-}
-
-#status-line {
-  font-weight: 600;
-  margin-bottom: 0.5rem;
+.console summary {
+  cursor: pointer;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 #log {
-  white-space: pre-wrap;
-  font-family: ui-monospace, "SF Mono", Consolas, monospace;
-  font-size: 0.8rem;
-  max-height: 40vh;
+  max-height: 14rem;
   overflow-y: auto;
-  background: rgba(128, 128, 128, 0.08);
-  border-radius: 6px;
-  padding: 0.75rem;
-  margin: 0;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  border: 1px solid var(--rule);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
+
+/* --------------------------------- CHAT -------------------------------- */
+
+#chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: transparent;
+}
+
+/* Status/debug strip. Deliberately tiny and unpunctuated -- it is
+   instrumentation, not UI copy. */
+.hud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.25rem;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  color: var(--phosphor-dim);
+  background: transparent;
+  border-bottom: 1px solid rgba(75, 240, 122, 0.14);
+}
+
+#hud-model { color: var(--phosphor); }
+
+.transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.25rem clamp(0.75rem, 4vw, 2rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.bubble {
+  max-width: min(46rem, 82%);
+  padding: 0.6rem 0.9rem;
+  border: 1px solid transparent;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 0.9rem;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--bubble-user);
+  border-color: rgba(75, 240, 122, 0.3);
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: var(--bubble-ai);
+  border-color: rgba(230, 242, 230, 0.14);
+}
+
+.bubble.system {
+  align-self: center;
+  max-width: 34rem;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--amber);
+  background: transparent;
+  border-color: rgba(255, 180, 84, 0.35);
+}
+
+/* Block cursor on the reply currently being streamed. */
+.bubble.streaming::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: -0.12em;
+  background: var(--phosphor);
+  animation: blink 1.06s step-end infinite;
+}
+
+.composer {
+  padding: 0.6rem clamp(0.75rem, 4vw, 2rem) 0.9rem;
+  border-top: 1px solid rgba(75, 240, 122, 0.14);
+  background: transparent;
+}
+
+.sampling {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.1rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.68rem;
+  color: var(--phosphor-dim);
+}
+
+.sampling label { display: flex; align-items: center; gap: 0.35rem; }
+.sampling input[type="range"] { width: 6rem; accent-color: var(--phosphor); }
+.sampling input[type="checkbox"] { accent-color: var(--phosphor); }
+.sampling output { min-width: 2.4em; }
+
+.composer-row { display: flex; gap: 0.6rem; align-items: flex-end; }
+
+textarea {
+  flex: 1;
+  resize: none;
+  max-height: 8rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  padding: 0.55rem 0.7rem;
+  color: var(--fg);
+  background: rgba(230, 242, 230, 0.06);
+  border: 1px solid var(--rule);
+  caret-color: var(--phosphor);
+}
+
+textarea:focus { outline: 1px solid var(--phosphor); }
+textarea::placeholder { color: var(--phosphor-dim); }
+
+#stop { background: var(--amber); border-color: var(--amber); }
+#stop:hover { box-shadow: 0 0 14px rgba(255, 180, 84, 0.5); }

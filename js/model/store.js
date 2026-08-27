@@ -80,3 +80,36 @@ export async function getTensor(modelId, dtype, name) {
     req.onerror = () => reject(req.error);
   });
 }
+
+// Reads every named tensor back into a Map<name, record> -- the shape
+// transformer.js expects. One readonly transaction with all the gets
+// queued up front, rather than getTensor() in a loop: each await there
+// would let the transaction auto-close and force a fresh one per tensor,
+// which for ~270 tensors is measurably slower for no reason.
+//
+// onProgress(done, total, name) fires as records arrive, since reading
+// ~135MB back out of IndexedDB is slow enough to want a progress bar.
+export async function getAllTensors(modelId, dtype, names, onProgress) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TENSOR_STORE, "readonly");
+    const objectStore = tx.objectStore(TENSOR_STORE);
+    const tensors = new Map();
+    let done = 0;
+    for (const name of names) {
+      const req = objectStore.get(tensorKey(modelId, dtype, name));
+      req.onsuccess = () => {
+        if (req.result === undefined) {
+          reject(new Error(`Tensor missing from cache: ${name}`));
+          return;
+        }
+        tensors.set(name, req.result);
+        done++;
+        if (onProgress) onProgress(done, names.length, name);
+      };
+    }
+    tx.oncomplete = () => resolve(tensors);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}

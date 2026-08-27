@@ -420,3 +420,188 @@ real weights). Clears Phase 7's exit criterion.
   per-step errors can eventually flip a close top-2 decision. The top-10
   ranking check (plan.md Phase 6's other stated concern) stayed stable in
   both single-step checks run here.
+
+---
+
+## Phase 8: Chat UI (worker, persisted cache, streaming, sampling)
+
+Done and verified end-to-end in a real browser, not just in Node. This is
+the first phase where the thing actually *is* an app.
+
+### The worker boundary
+
+`js/worker.js` is new and now owns the weights, the KV cache, and the
+generation loop; `js/main.js` was rewritten to own only the DOM. Nothing
+in `main.js` imports from `js/model/` any more except `models.js` (the
+registry) and `store.js` (`getManifest`, to decide whether a model shows
+"Download" or "Load"), so there is no route by which a forward pass can
+end up on the UI thread. Module worker (`type: "module"`), which is what
+lets the worker `import` the existing engine unchanged.
+
+Message protocol, main -> worker: `load`, `generate`, `stop`. Worker ->
+main: `log`, `status`, `progress`, `ready`, `reply-start`,
+`prefill-done`, `token`, `reply-done`, `rejected`, `error`.
+
+**The stop button needed a deliberate yield.** A worker message handler
+runs to completion, so a generation loop that never awaits is
+uninterruptible -- `stop` would sit in the queue until the reply finished,
+which is exactly when you no longer want it. `yieldToMessages()` (a
+`setTimeout(0)` await) runs once per token so the queue drains. Against a
+~450ms token that is free, and it is the only reason the stop button does
+anything.
+
+### Two things the browser found that Node could not
+
+Both were silent no-ops, not errors, and both are worth remembering
+because they are the same shape: **an API that exists on `Window` but not
+in a worker, accessed through optional chaining, which therefore just
+skips.**
+
+1. **`StorageManager.persist()` is Window-only.** Workers get
+   `navigator.storage.estimate()` but not `persist()`. Moving the load
+   flow into the worker silently dropped the persistence request that
+   Phase 1 added -- `if (navigator.storage?.persist)` was simply false
+   forever, so the ~135MB cache was evictable and nobody would have found
+   out until a repeat visit re-downloaded. Now requested from `main.js`
+   before the load message is posted.
+2. **`performance.memory` is not exposed in workers at all.** It is
+   Chrome-only and non-standard to begin with, and the standardized
+   `measureUserAgentSpecificMemory()` needs cross-origin isolation, which
+   GitHub Pages cannot provide (gotcha 23). Even on the main thread it
+   would report the *main thread's* isolate and miss every byte of the
+   model. Replaced with `residentMB()`, which sums the actual
+   `byteLength`s of the loaded tensors plus the KV cache buffers -- a
+   measured number rather than a probe, and the one that actually decides
+   whether a phone kills the tab. Reads `mem 174MB` for the 135M at 1k
+   ctx (129MB weights + 45MB cache), which matches plan.md 1.4's table.
+
+### Per-turn prefill, and why it is safe
+
+The persisted cache (gotcha 22) means each turn feeds only its own
+tokens. `template.js` gained `renderSystemTurn()`, `renderUserTurn()` and
+`renderTurnClose()` to render the template in pieces.
+
+The load flow prefills the system prompt *before* "Start chat" appears,
+so the first user message never pays for it. The button genuinely means
+ready.
+
+**`renderTurnClose()` is the non-obvious piece.** The template puts a
+`\n` after the assistant's `<|im_end|>`, but the model emits the
+`<|im_end|>` and not the newline, so the next turn has to carry a leading
+`\n`. And if generation was cut short -- token budget or the stop button
+-- the `<|im_end|>` is missing too and has to be supplied, or the context
+sits mid-turn and the next prompt is off-format, which collapses these
+models to base-model rambling (gotcha 16). Verified in the browser: a
+turn sent immediately after a stopped reply prefills 19 tokens instead of
+18 (the repair) and answers normally.
+
+**Streaming needed a stateful decoder.** Byte-level BPE splits multi-byte
+UTF-8 across tokens, so `decode([id])` per token emits U+FFFD for any
+emoji or accented character. `StreamDecoder` (new, in `tokenizer.js`)
+wraps `TextDecoder` in `stream: true` mode, which holds an incomplete
+trailing sequence until its continuation arrives. `Tokenizer.decode()`
+was refactored to share `tokenBytes()` with it; unchanged behaviour,
+golden tests still pass.
+
+### Sampling
+
+`sample.js` gained `sampleToken({temperature, topP})`. `temperature <= 0`
+is greedy and is the default, which keeps every golden test on the
+deterministic path unchanged. Nucleus sampling sorts all 49152 entries
+every token -- deliberate: a partial top-K selection would give the same
+answer for any sane `topP`, but a ~10ms sort against a 450ms token is a
+few percent, and "softmax, sort, accumulate, draw" is the version you can
+read and confirm.
+
+### Context policy
+
+plan.md section 7, implemented: `MAX_CTX = 1024`, `REPLY_RESERVE = 256`,
+hard stop. A turn that would not leave room for a reply is refused
+*before* anything enters the cache, so the conversation stays intact and
+usable. Verified in the browser by pasting an 811-token message: "Out of
+context: this turn is 811 tokens and only 510 fit while reserving 256 for
+the reply (258/1024 used)", conversation still working afterwards.
+
+### tests/chat-turns.mjs
+
+Three checks, cheapest first (`node tests/chat-turns.mjs [135M|360M]`):
+
+1. **Incremental tokenization == one-shot.** Feeding the conversation a
+   turn at a time produces byte-identical token ids to rendering the whole
+   thing and encoding it once, and the assembled turns reproduce
+   `renderChatPrompt()` character for character. This is the assumption
+   the entire persisted-cache design rests on, and it is not free -- it
+   holds only because special tokens are matched literally before
+   pretokenization (gotcha 9), which keeps the lone `\n` between
+   `<|im_end|>` and `<|im_start|>` encoding the same in isolation as
+   mid-string. If it broke, every turn after the first would be quietly
+   off-format with no error.
+2. **Persisted cache == from-scratch prefill.** A 3-turn conversation run
+   through one persisted cache lands in the same state as a fresh cache
+   prefilled with all 115 tokens at once: **max abs diff 0.0** across
+   every layer's K and V, and `seqLen == tokens fed` exactly (gotcha 20).
+3. **Turn latency.** Turn 3 must not cost more than turn 2.
+
+**Result (135M):** turns prefilled in 1050 / 1448 / 1199 ms -- flat, not
+growing. A full 115-token re-prefill of the same conversation costs
+**7617ms**, which is what the persisted cache is buying down, and it is
+the number that would grow every turn without it. Clears Phase 8's exit
+criterion ("turn 3 no slower to start than turn 2").
+
+### Browser verification (Chrome, localhost, 135M)
+
+- Cold: 269MB downloaded + quantized + stored in **39s**, then system
+  prompt prefilled (21 tok, 1.6s) -> "Start chat".
+- Warm reload: cache detected, **3.0s** from click to ready.
+- Two-turn conversation, coherent, streamed token by token, stopped
+  cleanly on `<|im_end|>` with no marker leaking into the bubble.
+  **2.2 tok/s** at ~100 tokens of context, against plan.md section 3's
+  predicted ~2.7 at full 1k. Turn 2 prefilled 18 tokens (1.5s) rather
+  than re-prefilling 102.
+- Stop button interrupts mid-reply, marks `[stopped]`, re-enables input.
+- Temperature/top-p unlock when "greedy" is unchecked and visibly change
+  the output.
+
+### Styling
+
+1980s terminal: near-black `#06080a`, phosphor green `#4bf07a` chrome,
+white-ish `#e6f2e6` body text, blinking block cursors (title and the
+streaming reply), scanline overlay, uppercase letter-spaced labels.
+
+**The typeface is a system monospace stack, not a webfont, on purpose.**
+plan.md's zero-dependency rule is written about inference, but the same
+argument applies harder here: a Google Fonts `<link>` would be a
+third-party request on every page load for a project whose whole premise
+is that nothing leaves the tab except the weights. Every platform ships
+something with the right character.
+
+**The chat screen is transparent all the way down to `<body>`** -- HUD,
+transcript, composer and bubbles all have transparent or translucent
+backgrounds, and `<body>` is the only opaque surface in the document.
+Dropping a canvas visualization in behind the chat later needs no
+restyling, which is what it was built for.
+
+### Deviations / things worth knowing
+
+- **A cached model shows "Load", not "Start chat".** The landing page
+  sketch called for going straight to a chat button when cached, but
+  there is real work between a cached download and a usable model:
+  reading ~135MB back out of IndexedDB and prefilling the system prompt,
+  ~3s together. Auto-starting both cached models at page load is worse
+  (only one can be resident, and it would allocate 135MB uninvited).
+  "Start chat" now strictly means *ready this instant*, which seemed the
+  more useful guarantee.
+- **Only one model resident at a time** (gotcha 23 -- no
+  SharedArrayBuffer, so no second worker sharing weights). Starting a
+  load locks the other panel out rather than queueing.
+- **No conversation reset button yet.** Running out of context says
+  "reload to start a fresh conversation," which is honest but crude. A
+  reset is just `cache.seqLen = 0` plus re-prefilling the system prompt;
+  it is not in Phase 8's exit criterion so it is not here.
+- **`.claude/launch.json`** added: `python -m http.server 8123`, for
+  driving the real page during development. Module workers need an HTTP
+  origin -- none of this runs from `file://`.
+- **360M not re-verified this phase**, per direction: the transformer
+  math is model-agnostic and driven entirely by `config.json`, and
+  nothing in Phase 8 touches it. Phase 9 will exercise 360M on real
+  hardware.
