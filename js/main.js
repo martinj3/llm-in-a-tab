@@ -1,7 +1,9 @@
-import { MODELS, resolveUrl } from "./models.js";
+import { MODELS } from "./models.js";
 import { fetchModelConfig } from "./model/config.js";
-import { headContentLength, downloadWithProgress } from "./model/download.js";
-import { getModelRecord, putModelRecord } from "./model/store.js";
+import { loadModelTensors } from "./model/safetensors.js";
+import { getTensor } from "./model/store.js";
+
+const DTYPE = "i8";
 
 const statusLine = document.getElementById("status-line");
 const logEl = document.getElementById("log");
@@ -54,6 +56,35 @@ async function requestPersistence() {
   log(`Storage persistence ${granted ? "granted" : "NOT granted"}.`);
 }
 
+// Phase 2 exit criterion: "a weight histogram looks like a bell curve
+// centered near zero." Dequantizes one row of a real weight matrix and
+// renders a quick ASCII histogram so a human can eyeball the distribution
+// without any charting library.
+async function logWeightHistogram(modelId, dtype) {
+  const record = await getTensor(modelId, dtype, "model.layers.0.self_attn.q_proj.weight");
+  if (!record || record.kind !== "i8") return;
+
+  const [, numCols] = record.shape;
+  const scale = record.scales[0];
+  const row = new Float32Array(numCols);
+  for (let c = 0; c < numCols; c++) row[c] = record.qweight[c] * scale;
+
+  const maxAbs = Math.max(...row.map(Math.abs), 1e-8);
+  const bins = 11;
+  const counts = new Array(bins).fill(0);
+  for (const v of row) {
+    const bucket = Math.min(bins - 1, Math.floor(((v + maxAbs) / (2 * maxAbs)) * bins));
+    counts[bucket]++;
+  }
+  const maxCount = Math.max(...counts);
+  const lines = counts.map((c, i) => {
+    const lo = (-maxAbs + (2 * maxAbs * i) / bins).toFixed(3);
+    const bar = "#".repeat(Math.round((c / maxCount) * 30));
+    return `  ${lo.padStart(8)}  ${bar}`;
+  });
+  log(`Histogram of layer 0 q_proj row 0 (${numCols} values, dequantized):\n${lines.join("\n")}`);
+}
+
 async function handleDownload(modelId) {
   const model = MODELS[modelId];
   setButtonsDisabled(true);
@@ -68,42 +99,24 @@ async function handleDownload(modelId) {
 
     await reportStorageEstimate();
 
-    const weightsUrl = resolveUrl(modelId, "model.safetensors");
-    setStatus(`Checking cache for ${model.label}...`);
-    const remoteLength = await headContentLength(weightsUrl);
-    log(`Remote model.safetensors size: ${(remoteLength / 1e6).toFixed(1)} MB`);
-
-    const cached = await getModelRecord(modelId);
-    if (cached && cached.contentLength === remoteLength) {
-      log(`Cache hit: using stored copy (${(cached.bytes.byteLength / 1e6).toFixed(1)} MB), skipping network.`);
-      setStatus(`${model.label} ready (from cache).`);
-      setButtonsDisabled(false);
-      return;
-    }
-
-    if (cached) {
-      log("Cached copy size mismatch with remote -- re-downloading.");
-    }
-
-    setStatus(`Downloading ${model.label}...`);
-    const { buffer, byteLength } = await downloadWithProgress(weightsUrl, showProgress);
+    setStatus(`Loading ${model.label} tensors...`);
+    const result = await loadModelTensors(modelId, config, DTYPE, (loaded, total, name, i, n) => {
+      showProgress(loaded, total);
+      setStatus(`Loading ${model.label}: tensor ${i}/${n} (${name})`);
+    });
     hideProgress();
 
-    if (remoteLength !== null && byteLength !== remoteLength) {
-      throw new Error(
-        `Downloaded ${byteLength} bytes but Content-Length said ${remoteLength} -- truncated download.`
+    if (result.cached) {
+      log(`Cache hit: ${result.tensorNames.length} tensors already stored, skipped the network.`);
+    } else {
+      log(
+        `Loaded and quantized ${result.tensorNames.length} tensors from ` +
+          `${(result.remoteLength / 1e6).toFixed(1)} MB of source data.`
       );
+      await requestPersistence();
     }
-    log(`Downloaded ${(byteLength / 1e6).toFixed(1)} MB. Storing in IndexedDB...`);
 
-    await putModelRecord({
-      id: modelId,
-      contentLength: remoteLength,
-      bytes: buffer,
-      downloadedAt: Date.now(),
-    });
-
-    await requestPersistence();
+    await logWeightHistogram(modelId, DTYPE);
     setStatus(`${model.label} ready.`);
   } catch (err) {
     console.error(err);

@@ -1,21 +1,33 @@
-// IndexedDB persistence for downloaded model bytes.
+// IndexedDB persistence for quantized model tensors.
 //
-// One object store, "models", keyed by model id. Each record holds the raw
-// bytes for a given model plus enough metadata (content-length) to verify a
-// cache hit without re-downloading. Phase 2 will add a second field for the
-// quantized tensors; this file stays generic on purpose.
+// Two object stores:
+//   "tensors"   one record per tensor, keyed by "modelId:dtype:tensorName".
+//               Splitting by tensor (instead of one whole-model blob) keeps
+//               individual records small and lets Phase 2's per-tensor
+//               loader write results as they arrive.
+//   "manifests" one record per (modelId, dtype), listing every tensor name
+//               written and the source file's content-length at download
+//               time. Its presence with complete:true is what lets a
+//               reload skip the network entirely.
 
 const DB_NAME = "llm-in-a-tab";
-const DB_VERSION = 1;
-const STORE_NAME = "models";
+const DB_VERSION = 2;
+const TENSOR_STORE = "tensors";
+const MANIFEST_STORE = "manifests";
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+      if (db.objectStoreNames.contains("models")) {
+        db.deleteObjectStore("models"); // superseded by per-tensor storage
+      }
+      if (!db.objectStoreNames.contains(TENSOR_STORE)) {
+        db.createObjectStore(TENSOR_STORE);
+      }
+      if (!db.objectStoreNames.contains(MANIFEST_STORE)) {
+        db.createObjectStore(MANIFEST_STORE);
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -23,34 +35,48 @@ function openDB() {
   });
 }
 
-function tx(db, mode) {
-  return db.transaction(STORE_NAME, mode).objectStore(STORE_NAME);
+function manifestKey(modelId, dtype) {
+  return `${modelId}:${dtype}`;
 }
 
-// record shape: { id, contentLength, bytes: ArrayBuffer, downloadedAt }
-export async function getModelRecord(modelId) {
+function tensorKey(modelId, dtype, name) {
+  return `${modelId}:${dtype}:${name}`;
+}
+
+export async function getManifest(modelId, dtype) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const req = tx(db, "readonly").get(modelId);
+    const req = db.transaction(MANIFEST_STORE, "readonly").objectStore(MANIFEST_STORE).get(manifestKey(modelId, dtype));
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-export async function putModelRecord(record) {
+export async function putManifest(modelId, dtype, manifest) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const req = tx(db, "readwrite").put(record);
+    const req = db.transaction(MANIFEST_STORE, "readwrite").objectStore(MANIFEST_STORE).put(manifest, manifestKey(modelId, dtype));
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   });
 }
 
-export async function deleteModelRecord(modelId) {
+// record shape: { kind: 'i8', shape, qweight: Int8Array, scales: Float32Array }
+//            or { kind: 'f32', shape, f32: Float32Array }
+export async function putTensor(modelId, dtype, name, record) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const req = tx(db, "readwrite").delete(modelId);
+    const req = db.transaction(TENSOR_STORE, "readwrite").objectStore(TENSOR_STORE).put(record, tensorKey(modelId, dtype, name));
     req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getTensor(modelId, dtype, name) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(TENSOR_STORE, "readonly").objectStore(TENSOR_STORE).get(tensorKey(modelId, dtype, name));
+    req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
