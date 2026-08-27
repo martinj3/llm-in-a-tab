@@ -56,10 +56,23 @@ body {
 
 /* Both screens stack in the same place; only opacity/visibility differ,
    which is what makes the landing -> chat handoff a cross-fade rather
-   than a layout jump. */
+   than a layout jump.
+
+   height/top come from --vv-height/--vv-top (set in main.js from
+   window.visualViewport) rather than inset:0 + 100vh, so the on-screen
+   keyboard on iOS shrinks the screen to the space actually left above it
+   instead of leaving it sized for the whole layout viewport and scrolled
+   out from under the keyboard -- which is what was carrying the HUD strip
+   out of view. The 100dvh fallback covers browsers without
+   visualViewport. */
 .screen {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: 0;
+  top: var(--vv-top, 0px);
+  height: 100vh;
+  height: var(--vv-height, 100dvh);
   overflow-y: auto;
   transition: opacity 600ms ease;
 }
@@ -217,6 +230,14 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   .panel-action[data-role="chat"] { animation: none; }
 }
 
+.cache-note {
+  width: 100%;
+  max-width: 46rem;
+  margin: 0 0 1.25rem;
+  font-size: 0.72rem;
+  color: var(--phosphor-dim);
+}
+
 .console {
   width: 100%;
   max-width: 46rem;
@@ -344,7 +365,9 @@ textarea {
   resize: none;
   max-height: 8rem;
   font-family: inherit;
-  font-size: 0.9rem;
+  /* iOS Safari zooms the page in on focus for any text field under 16px;
+     this is the actual on-screen size, not just a base for rem math. */
+  font-size: 16px;
   line-height: 1.45;
   padding: 0.55rem 0.7rem;
   color: var(--fg);

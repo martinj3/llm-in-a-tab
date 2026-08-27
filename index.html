@@ -26,7 +26,6 @@
         <dl class="specs">
           <div><dt>params</dt><dd>135 M</dd></div>
           <div><dt>layers</dt><dd>30</dd></div>
-          <div><dt>download</dt><dd>269 MB</dd></div>
           <div><dt>in tab</dt><dd>~135 MB int8</dd></div>
         </dl>
         <p class="panel-note">Recommended. Runs on phones.</p>
@@ -35,7 +34,7 @@
           <span class="bar-label"></span>
         </div>
         <p class="panel-status">Not downloaded.</p>
-        <button class="panel-action" type="button">Download</button>
+        <button class="panel-action" type="button" data-download-label="Download (269 MB)">Download (269 MB)</button>
       </fieldset>
 
       <fieldset class="model-panel" id="panel-360M" data-model="360M">
@@ -43,7 +42,6 @@
         <dl class="specs">
           <div><dt>params</dt><dd>362 M</dd></div>
           <div><dt>layers</dt><dd>32</dd></div>
-          <div><dt>download</dt><dd>723 MB</dd></div>
           <div><dt>in tab</dt><dd>~360 MB int8</dd></div>
         </dl>
         <p class="panel-note">Desktop. Slower, noticeably better.</p>
@@ -52,9 +50,12 @@
           <span class="bar-label"></span>
         </div>
         <p class="panel-status">Not downloaded.</p>
-        <button class="panel-action" type="button">Download</button>
+        <button class="panel-action" type="button" data-download-label="Download (723 MB)">Download (723 MB)</button>
       </fieldset>
     </div>
+
+    <p class="cache-note">Downloads are cached by the browser, so each device only fetches a
+      model once -- reloading or coming back later reuses the local copy.</p>
 
     <details class="console">
       <summary>console</summary>
@@ -83,7 +84,8 @@
           <output id="top-p-out">0.90</output></label>
       </div>
       <div class="composer-row">
-        <textarea id="input" rows="1" placeholder="Say something..." autocomplete="off"></textarea>
+        <textarea id="input" rows="1" placeholder="Say something..." autocomplete="off"
+          autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send"></textarea>
         <button type="submit" id="send">Send</button>
         <button type="button" id="stop" hidden>Stop</button>
       </div>

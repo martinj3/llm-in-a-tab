@@ -31,6 +31,24 @@ const hud = {
   mem: document.getElementById("hud-mem"),
 };
 
+// ---------------------------- mobile viewport ---------------------------
+// iOS Safari (and Chrome-on-iOS, which is Safari underneath) does not
+// resize position:fixed elements when the on-screen keyboard opens -- the
+// layout viewport stays full-height and the page scrolls to keep the
+// focused field visible, carrying fixed content like the HUD strip up out
+// of view with it. window.visualViewport reports the part of the page
+// actually visible above the keyboard, so screens are pinned to that
+// instead of to 100vh.
+function syncViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  document.documentElement.style.setProperty("--vv-height", `${vv.height}px`);
+  document.documentElement.style.setProperty("--vv-top", `${vv.offsetTop}px`);
+}
+window.visualViewport?.addEventListener("resize", syncViewport);
+window.visualViewport?.addEventListener("scroll", syncViewport);
+syncViewport();
+
 function setMem(residentMB) {
   hud.mem.textContent = residentMB ? `mem ${residentMB.toFixed(0)}MB` : "mem --";
 }
@@ -109,7 +127,7 @@ async function refreshCacheStates() {
     const manifest = await getManifest(modelId, DTYPE);
     if (manifest?.complete) {
       setPanelStatus(modelId, `Cached locally (${manifest.tensorNames.length} tensors). No download needed.`);
-      setPanelAction(modelId, "Load", "load");
+      setPanelAction(modelId, "Load (cached)", "load");
     }
   }
 }
