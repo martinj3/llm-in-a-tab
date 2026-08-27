@@ -228,10 +228,24 @@ async function handleGenerate({ text, temperature, topP, maxNewTokens }) {
     }
 
     const piece = decoder.push(tokenId);
-    if (piece) post({ type: "token", text: piece });
     generated++;
 
     logits = decodeStep(tensors, config, cache, tokenId);
+
+    // seqLen/tok-s are worth showing live rather than only once the reply
+    // finishes -- a reply can run tens of seconds on a phone, and "ctx --/--"
+    // sitting frozen the whole time looks like the HUD stopped working
+    // rather than like it is just waiting to report at the end.
+    const elapsedMs = performance.now() - decodeStart;
+    if (piece) {
+      post({
+        type: "token",
+        text: piece,
+        seqLen: cache.seqLen,
+        maxCtx: MAX_CTX,
+        tokensPerSecond: elapsedMs > 0 ? generated / (elapsedMs / 1000) : 0,
+      });
+    }
 
     await yieldToMessages();
     if (stopRequested) {

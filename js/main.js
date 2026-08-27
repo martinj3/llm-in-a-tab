@@ -312,6 +312,8 @@ worker.onmessage = (event) => {
         streamingBubble.append(message.text);
         scrollTranscript();
       }
+      updateCtx(message.seqLen, message.maxCtx);
+      hud.speed.textContent = `${message.tokensPerSecond.toFixed(2)} tok/s`;
       break;
 
     case "reply-done": {
