@@ -16,13 +16,26 @@
 // descent rate is set by measured token time -- so the speed of the fall
 // is an honest readout of tok/s.
 //
-// WHY THE CAMERA NEVER CUTS. A token takes 150ms-1s. Cutting to each
-// plate in turn at that rate is a strobe, and panning down the stack and
-// then snapping back to the top once per token is a strobe with extra
-// steps. So the tower is treated as endless instead: each token's plates
-// are laid out below the previous token's, separated by a band naming the
-// token that pass emitted, and the camera simply falls. No cuts anywhere,
-// and you watch tokens stream past as you descend.
+// WHY THE CAMERA CUTS. The tower is endless -- each token's plates are
+// laid out below the previous token's, separated by a band naming the
+// token that pass emitted -- and the camera only ever moves down it. But
+// it moves in whole plates. It holds on one plate for that plate's entire
+// dwell time and then jumps a full slot, rather than sliding.
+//
+// This is the second attempt. Falling smoothly was the obvious reading of
+// "descend through the layers", and it is unreadable: everything on screen
+// is in motion, so the eye tracks the motion instead of the cells, and the
+// thing you are meant to be watching -- which neurons fired -- goes past as
+// a blur. Cutting fixes it by making the frame the stationary part. A
+// plate's transform depends only on its integer distance from the camera,
+// so the next layer's cells land on exactly the pixels the last one used
+// and the plate reads as a panel of lights that changes rather than a
+// surface that travels. Motion is reserved for the one thing it is good
+// at: signalling that something happened.
+//
+// The camera still tracks a continuous position internally (camG) -- the
+// pacing controller needs fractions of a plate to chase the worker with --
+// and only the rendered position (camV) is quantized.
 //
 // WHY IT DOES NOT SHOW EVERY LAYER OF EVERY TOKEN. It cannot. Thirty
 // layers is sixty plates, and 135M runs at up to 6 tok/s, which is 2.7ms
@@ -140,6 +153,12 @@ export function createStackViz(canvas) {
   let nextBase = 0; // global slot where the next token's run starts
   let nextStart = 0; // plate index within the model where it picks up
   let camG = 0; // camera position, in plate slots, monotonically increasing
+  // What the renderer actually uses: camG floored to a whole plate. The
+  // camera advances continuously so the pacing controller keeps working in
+  // fractions of a plate, but it is *drawn* only on plate boundaries, so
+  // the tower cuts from one plate to the next instead of sliding past.
+  // See WHY THE CAMERA CUTS at the top of this file.
+  let camV = 0;
   let arrivalEma = 380; // ms per token, smoothed
   let lastArrival = 0;
   // Token arrivals are timed against the same clock the render loop
@@ -218,6 +237,7 @@ export function createStackViz(canvas) {
     nextBase = 0;
     nextStart = 0;
     camG = 0;
+    camV = 0;
     lastArrival = 0;
     arrivalEma = 380;
     layoutGrid();
@@ -279,7 +299,7 @@ export function createStackViz(canvas) {
     // even though each token only covers part of it.
     nextStart = (nextStart + count) % plates;
     nextBase = frame.base + count + GAP;
-    if (frames.length === 0) camG = frame.base;
+    if (frames.length === 0) camG = camV = frame.base;
     frames.push(frame);
     prune();
     if (running) ensureRaf();
@@ -347,6 +367,11 @@ export function createStackViz(canvas) {
     // reaches that floor most of the time -- so the steady state would be
     // a screen that is empty below the middle.
     camG = Math.min(camG + speed * dt, Math.max(maxG - 0.85, frames[0].base));
+    // The cut. Everything above tracks a continuous position, and this is
+    // the one place it becomes discrete: the view holds on a plate for the
+    // whole of that plate's dwell time and then jumps a full slot, so the
+    // next layer lands its cells on exactly the pixels the last one used.
+    camV = Math.floor(camG);
     prune();
   }
 
@@ -958,7 +983,7 @@ export function createStackViz(canvas) {
     const mlpH = (plateWidth() / grid.w) * grid.h;
     const attnH = cfg.heads * (compact ? ATTN_ROW_PX_COMPACT : ATTN_ROW_PX);
     const spacing = Math.max(((mlpH + attnH) / 2) * 2.05, Hpx * 0.26);
-    const centre = Math.round(camG);
+    const centre = camV;
 
     // Mildly perspective rather than linear in z: distance compresses, so
     // the tower recedes into the top and bottom of the frame instead of
@@ -968,7 +993,7 @@ export function createStackViz(canvas) {
     // Farthest first, so nearer plates overlay them.
     const order = [];
     for (let d = -DRAW_SPAN; d <= DRAW_SPAN; d++) order.push(centre + d);
-    order.sort((p, q) => Math.abs(q - camG) - Math.abs(p - camG));
+    order.sort((p, q) => Math.abs(q - camV) - Math.abs(p - camV));
 
     let activeFrame = null;
     let activeLayer = 0;
@@ -976,7 +1001,11 @@ export function createStackViz(canvas) {
 
     for (const g of order) {
       if (g < 0) continue;
-      const z = g - camG;
+      // Integer by construction now, so a plate's transform is bit-identical
+      // from one cut to the next and the cells of successive layers land on
+      // the same pixels: the plate stops being a thing sliding past and
+      // becomes a panel of lights that changes.
+      const z = g - camV;
       const az = Math.abs(z);
       const s = 1 / (1 + az * 0.34);
       const a = clamp(1.15 - az * 0.3, 0, 1) * fade;

@@ -436,10 +436,18 @@ textarea::placeholder { color: var(--phosphor-dim); }
   border-bottom-color: rgba(75, 240, 122, 0.3);
 }
 
+/* Deliberately thin. A long reply is a tall bubble, and at the backdrop
+   opacity the HUD uses it would mask most of the stack for most of the
+   generation -- which is backwards, since the reply growing is exactly
+   when there is something to watch. The glyphs stay fully opaque and do
+   the legibility work themselves; the panel only has to keep the field
+   behind the text from reading as texture, and the soft dark halo does
+   more for that per unit of occlusion than a solid fill does. */
 #chat[data-generating="true"] .bubble.streaming {
-  background: rgba(6, 8, 10, 0.74);
-  border-color: rgba(75, 240, 122, 0.34);
-  box-shadow: 0 0 26px rgba(6, 8, 10, 0.75);
+  background: rgba(6, 8, 10, 0.38);
+  border-color: rgba(75, 240, 122, 0.3);
+  box-shadow: 0 0 22px rgba(6, 8, 10, 0.5);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
 }
 
 .hud { transition: background-color 420ms ease, border-color 420ms ease; }

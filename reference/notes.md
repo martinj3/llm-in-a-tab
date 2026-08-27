@@ -658,13 +658,37 @@ named-ops-in-sequence structure existed so activations could be observed
 without a rewrite; that turned out to be true, and the hook is three
 `if (probe)` branches in `runWithCache()`.
 
-**The camera never cuts.** A token is 150ms-1s. Cutting to each layer in
-turn is a strobe, and panning down and snapping back to the top once per
-token is a strobe with extra steps. So the tower is endless instead: each
-token's plates are laid out below the last token's, separated by a band
-naming the token that pass emitted, and the camera falls. (How *far* it
-falls per token is a separate question, revisited below once attention
-plates doubled the plate count.)
+**The tower is endless, and the camera only descends.** Panning down the
+stack and snapping back to the top once per token is a strobe with extra
+steps, so instead each token's plates are laid out below the last token's,
+separated by a band naming the token that pass emitted, and the camera
+falls through all of it. (How *far* it falls per token is a separate
+question, revisited below once attention plates doubled the plate count.)
+
+**The camera cuts between plates rather than sliding.** This was the
+second attempt and it is the single biggest legibility win in the whole
+visualization. Falling *smoothly* is the obvious reading of "descend
+through the layers", and it does not work: everything on screen is in
+motion, so the eye locks onto the motion and the thing it is supposed to
+be reading -- which neurons fired, where attention went -- streams past as
+a blur. It gets worse the better the model runs, since faster tokens mean
+faster descent.
+
+The fix is to make the frame the stationary part. `camV` is `camG` floored
+to a whole plate, and only `camV` reaches the renderer; a plate's
+transform then depends solely on its *integer* distance from the camera,
+so it is bit-identical from one cut to the next. Successive layers land
+their cells on exactly the same pixels, and a plate stops being a surface
+that travels and becomes a panel of lights that changes. Motion is left
+to do the one thing it is good at: signalling that something happened.
+
+`camG` stays continuous -- the pacing controller chases the worker in
+fractions of a plate and would judder if quantized -- so the quantization
+is one `Math.floor` at the very end of `step()`, not a change to the
+pacing model. Worth knowing if this is ever revisited: the dwell per plate
+is then whatever `PLATE_MS` and the measured token rate produce, and at
+16ms render frames that is 4-10 identical frames per plate, which the
+harness can assert on directly by hashing the canvas.
 
 **Three things had to be measured rather than guessed.**
 
@@ -708,6 +732,19 @@ entire UI to nothing -- page still laid out, `getBoundingClientRect`
 still plausible, every control silently not hit-testing. Same failure
 class as the invisible-overlay bug above, caught the same way
 (`elementFromPoint` on a control's own centre), and now guarded.
+
+**The streaming bubble's backdrop is deliberately thin.** During
+generation everything in the chat drops to ~0.09 opacity except the HUD,
+Stop, and the reply being written; those need a backdrop of their own,
+because text over a field of firing neurons is unreadable however opaque
+the glyphs are. But the HUD is a fixed 40px strip and the streaming bubble
+is not -- it grows for the whole reply, and at the HUD's 0.72 it ends up
+masking most of the stack for most of the generation, which is backwards:
+the reply growing is exactly when there is something to watch. So it sits
+at 0.38 with a soft dark halo and a `text-shadow` on the glyphs. Per unit
+of occlusion, the shadow and the halo buy more legibility than raising the
+fill does, because they only darken the pixels immediately behind the text
+instead of the whole rectangle.
 
 **Verifying a canvas with no compositor.** The Browser pane here does not
 composite, which means no screenshots and a frozen `requestAnimationFrame`
