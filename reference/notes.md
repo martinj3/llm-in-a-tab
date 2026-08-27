@@ -279,3 +279,144 @@ access":
   total work, but confirms the same order of magnitude). Prefill batching
   (Phase 7) and the KV cache (Phase 6) are exactly the two optimizations
   plan.md already earmarks for this.
+
+---
+
+## Status as of 2026-08-27 (session 2, continued): Phases 6 and 7
+
+Same session, same machine. Picked up right after Phase 5's commit and
+implemented both Phase 6 (int8 + KV cache + decode loop) and Phase 7
+(B=4 prefill batching), per the user's request to do "the next phase, or
+two."
+
+### Phase 6: KV cache, decode loop, int8
+
+Added `js/model/kvcache.js` (`createKVCache`: preallocated per-layer
+`Float32Array`s, position-major `[pos][kv_head][head_dim]`, a single
+`seqLen` fill counter) and `js/model/sample.js` (`argmax` only --
+temperature/top-p are explicitly Phase 8 scope, not added early).
+
+`transformer.js` gained `runWithCache()`, the shared engine behind both
+`prefillSequential()` (renamed from Phase 5's cache-free path once it grew
+a cache parameter) and `decodeStep()`. Same per-layer math as Phase 5's
+`forward()`, but K/V read from and write directly into the persistent
+cache buffers instead of a local per-call array -- attention for position
+`pos` reads cache entries `0..pos`, which covers both earlier calls
+(previous turns) and earlier tokens within the same call. `cache.seqLen`
+advances exactly once per call, after every layer has written every new
+token in that call (gotcha 20/21) -- never per-layer, since all layers in
+one call share the same set of absolute positions.
+
+**Golden vectors extended for multi-token generation.** Reused the
+`C:\tmp_golden_venv` Python environment from Phase 5 (still present) to
+write `reference/golden/generation_<model>.json`: same fixed one-turn
+prompt as the logits golden files, but now greedily generating 12 tokens
+(`torch.argmax` at each step, feeding the result back in) and recording
+the full id sequence up to and including EOS. Both models produced the
+identical, clean answer: `generated_ids` decodes to `"The capital of
+France is Paris.<|im_end|>"` (8 tokens, terminates on real EOS well before
+the 12-token cap). Generation script:
+`gen_golden_generation.py` in scratch, same shape as Phase 5's script,
+not committed (mirrors that decision).
+
+**`tests/golden-generate.mjs`** (committed, `node tests/golden-generate.mjs
+[135M|360M]`) checks three things against real weights loaded in-memory
+(f32 and i8, same duplicated fetch/decode slice pattern as
+`golden-forward.mjs`):
+
+1. Cache-based `prefill()` on the full prompt reproduces Phase 5's
+   cacheless `forward()` exactly -- **max abs diff 0.0** for both models
+   (same math, different storage, so this isn't just "close," it's
+   bit-identical). This is the regression check that the cache
+   refactor didn't silently change anything.
+2. i8 top-10 ranking at the prompt's last position (informational --
+   logged, not asserted against a separate golden file, since Phase 5's
+   `logits_*.json` already pins the f32 ranking and this session's real
+   assertion is on the *generation* outcome below).
+3. Greedy decode loop (`prefill()` once, then `decodeStep()` per new
+   token, `argmax` each time, stop on `<|im_end|>`) run separately in f32
+   and i8, both starting from a fresh cache, compared against
+   `generated_ids`.
+
+**Result:** f32 greedy generation matches the golden reference **exactly**
+for both models, full 8-token sequence including the EOS stop. i8 matches
+the reference for at least the first 6 tokens on both models -- 360M
+actually matches the *entire* sequence exactly in i8; 135M's i8 run
+diverges only on the very last token (generates id 657 instead of EOS id
+2, i.e. one token past "Paris." it fails to stop as cleanly) which is
+exactly the kind of late-sequence quantization drift plan.md's Phase 6
+description anticipates ("numeric tolerance loosens, but the top-k token
+ranking should stay stable") -- it's still deterministic and reproducible,
+just not bit-identical to fp32 arbitrarily far into a generation, which no
+int8 scheme would be. This clears Phase 6's exit criterion as stated.
+
+### Phase 7: B=4 batched prefill
+
+Added `matvecF32B4` / `matvecI8B4` / `linearB4` to `ops.js`: four explicit
+local accumulators (`a0..a3`), weight row loaded once and reused across
+all four, exactly as gotcha 17 specifies -- deliberately not a generalized
+"batch of N" loop, since the plan's own measurement showed a naive
+generalization (token loop innermost) running 2x *slower* than no
+batching at all.
+
+`transformer.js` gained `prefillBatched()`: same per-layer structure as
+`prefillSequential()`, but processes new tokens in chunks of 4 through
+each linear projection (q/k/v, o_proj, gate/up/down), with RoPE, attention,
+and the SiLU*up elementwise step still done per-token (no shared weight to
+reuse there, so no batching benefit to chase). A remainder chunk smaller
+than 4 pads the unused slots with a fixed all-zero buffer (`zeroH`/`zeroI`,
+allocated once, never written) rather than branching on chunk size inside
+the hot loop -- the padding slots' outputs are simply never read back into
+`hidden` or the KV cache. `prefill()` now points at `prefillBatched()`;
+the old sequential path stays exported as `prefillSequential()` purely for
+the regression test below, not for production use.
+
+**`tests/prefill-batch.mjs`** (committed, `node tests/prefill-batch.mjs
+[135M|360M]`) runs both prefill paths on the same real i8 weights and
+prompt into separate caches and diffs every layer's K and V buffer plus
+the final logits, then times both on a synthetic 256-token prompt (the
+same 37-token prompt tiled to length 256 -- content doesn't matter for a
+raw throughput comparison, only token count does).
+
+**Result:** identical output, both models -- **max abs diff 0.0** across
+every layer's K, every layer's V, and the final logits (not "within
+noise," literally zero; the batched kernel computes the same sums in the
+same order per output row, just grouped 4-wide, so there's no floating-
+point reassociation to even cause noise here). Speedup: **1.83x** (135M)
+and **1.79x** (360M) on the 256-token synthetic prefill -- consistent
+with plan.md section 3's measured ~1.9x (that number was from a tighter
+microbenchmark of the kernel in isolation; end-to-end through real
+attention/RoPE/residual overhead per chunk, 1.8x is the honest number on
+real weights). Clears Phase 7's exit criterion.
+
+### Deviations / things worth knowing
+
+- **`decodeStep()` never batches**, by design -- it always processes
+  exactly one new token through the unbatched `runWithCache()` path
+  (same function `prefillSequential()` calls with `tokenIds.length === 1`).
+  Batching's entire benefit is reusing a weight row across multiple
+  activation vectors; with one token there's nothing to reuse, so routing
+  single-token decode through the B=4 kernel would just pay the padding
+  overhead (3 wasted lanes) for zero benefit.
+- **The KV cache's `maxCtx` is caller-provided** at `createKVCache(config,
+  maxCtx)` -- there's no default context-length policy wired up yet
+  (plan.md section 7's "hard stop at the configured limit" is a Phase 8/9
+  concern once there's a UI to configure it from). Both test harnesses
+  size it to exactly what that run needs (prompt length + a small
+  headroom for generated tokens), not any real context budget.
+- **No worker.js yet.** Everything through Phase 7 runs in Node test
+  scripts against in-memory weights, same as Phase 5. `main.js` still only
+  drives the download-and-cache flow from Phase 0-2; wiring the KV
+  cache + decode loop into the actual browser UI (main thread posting to a
+  worker that owns the cache across turns, per plan.md 1.5) is Phase 8
+  scope, not done here.
+- **i8 quantization's error compounds over a generation, as expected.**
+  The 135M's one-token divergence at step 8 (of 8) is the first real,
+  measured evidence of this in this project -- Phase 5's single-forward-
+  pass check couldn't observe it, because there's no "step 8" in a single
+  forward pass. Worth remembering if int8 accuracy debugging comes up
+  later: it's not that the i8 loader is subtly wrong, it's that greedy
+  argmax over many steps is exactly the kind of process where small
+  per-step errors can eventually flip a close top-2 decision. The top-10
+  ranking check (plan.md Phase 6's other stated concern) stayed stable in
+  both single-step checks run here.

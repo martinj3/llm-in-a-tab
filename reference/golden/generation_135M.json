@@ -1,0 +1,61 @@
+{
+  "model": "135M",
+  "repo": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is the capital of France?"
+    }
+  ],
+  "prompt_text": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
+  "prompt_ids": [
+    1,
+    9690,
+    198,
+    2683,
+    359,
+    253,
+    5356,
+    5646,
+    11173,
+    3365,
+    3511,
+    308,
+    34519,
+    28,
+    7018,
+    411,
+    407,
+    19712,
+    8182,
+    2,
+    198,
+    1,
+    4093,
+    198,
+    1780,
+    314,
+    260,
+    3575,
+    282,
+    4649,
+    47,
+    2,
+    198,
+    1,
+    520,
+    9531,
+    198
+  ],
+  "generated_ids": [
+    504,
+    3575,
+    282,
+    4649,
+    314,
+    7042,
+    30,
+    2
+  ],
+  "generated_text": "The capital of France is Paris.<|im_end|>"
+}

@@ -49,6 +49,61 @@ export function linear(out, tensor, x, outDim, inDim) {
   }
 }
 
+// B=4 batched matvec (plan.md 1.6/section 3, Phase 7): the same weight row
+// is read once and multiplied against 4 activation vectors before moving to
+// the next row, instead of re-reading every row once per token. This is the
+// one place batching beats scalar loop overhead, because each weight byte
+// is reused -- and it ONLY works with explicit local accumulators (a0..a3)
+// and the weight load in the outer position. Putting the token loop
+// innermost measured 2x *slower* than not batching at all (gotcha 17), so
+// there is deliberately no generalized "batch of N" version -- B=4 is a
+// fixed, hand-written kernel, not a loop over a batch dimension.
+export function matvecF32B4(out0, out1, out2, out3, W, x0, x1, x2, x3, outDim, inDim) {
+  for (let j = 0; j < outDim; j++) {
+    const rowStart = j * inDim;
+    let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    for (let k = 0; k < inDim; k++) {
+      const w = W[rowStart + k];
+      a0 += w * x0[k];
+      a1 += w * x1[k];
+      a2 += w * x2[k];
+      a3 += w * x3[k];
+    }
+    out0[j] = a0;
+    out1[j] = a1;
+    out2[j] = a2;
+    out3[j] = a3;
+  }
+}
+
+export function matvecI8B4(out0, out1, out2, out3, qW, scales, x0, x1, x2, x3, outDim, inDim) {
+  for (let j = 0; j < outDim; j++) {
+    const rowStart = j * inDim;
+    let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    for (let k = 0; k < inDim; k++) {
+      const w = qW[rowStart + k];
+      a0 += w * x0[k];
+      a1 += w * x1[k];
+      a2 += w * x2[k];
+      a3 += w * x3[k];
+    }
+    const s = scales[j];
+    out0[j] = a0 * s;
+    out1[j] = a1 * s;
+    out2[j] = a2 * s;
+    out3[j] = a3 * s;
+  }
+}
+
+// Batched counterpart to linear() -- same f32/i8 dispatch on tensor.kind.
+export function linearB4(out0, out1, out2, out3, tensor, x0, x1, x2, x3, outDim, inDim) {
+  if (tensor.kind === "f32") {
+    matvecF32B4(out0, out1, out2, out3, tensor.f32, x0, x1, x2, x3, outDim, inDim);
+  } else {
+    matvecI8B4(out0, out1, out2, out3, tensor.qweight, tensor.scales, x0, x1, x2, x3, outDim, inDim);
+  }
+}
+
 // Row `tok` of an [V, H] embedding tensor, dequantized if needed. Also
 // used as the lm_head input weight is never read this way -- lm_head goes
 // through linear() instead, since tie_word_embeddings makes it a matvec
