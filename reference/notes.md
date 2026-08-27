@@ -645,3 +645,118 @@ caught it is `document.elementFromPoint()` on a control's own center,
 asserting the element returned *is* that control; that is now how the
 overlay behaviour is verified, since it works without a compositing
 pane.
+
+### The activation visualization
+
+The chat screen now sits over a canvas showing the forward pass that is
+producing the reply: a tower of layer plates the camera falls through,
+one full stack per generated token. Every cell is one entry of that
+layer's SwiGLU activation vector, the fan above each plate is its
+head-averaged attention onto the context, and the trace below is the
+residual stream leaving it. `transformer.js`'s header always claimed its
+named-ops-in-sequence structure existed so activations could be observed
+without a rewrite; that turned out to be true, and the hook is three
+`if (probe)` branches in `runWithCache()`.
+
+**The camera never cuts.** A token is 150ms-1s, so 30 layers get 5-30ms
+each. Cutting to each layer in turn is a strobe, and panning down and
+snapping back to the top once per token is a strobe with extra steps. So
+the tower is endless instead: each token's layers are laid out below the
+last token's, separated by a band naming the token that pass emitted, and
+the camera falls at whatever speed keeps it ~0.75 tokens behind the
+worker. The descent rate is therefore an honest readout of tok/s.
+
+**Three things had to be measured rather than guessed.**
+
+*Activation statistics.* The first attempt tuned the colour ramp against
+invented data and looked like television static. Real SwiGLU activations
+are far sparser than any obvious guess: 75% of neurons sit below 1/16 of
+their layer's peak, 90% below 1/8, under 1% above half
+(`tests/dump-frames.mjs` prints the histogram). The ramps -- and the
+bloom threshold, which at first lit exactly one neuron per layer -- are
+now set from that distribution. The negative ramp is much *steeper* than
+the positive one rather than merely dimmer, because 42% of neurons are
+negative and a matched ramp paints every layer olive.
+
+*Frame cost.* Each plate is blitted from a tiny offscreen canvas at one
+device pixel per neuron, not drawn as ~1500 fillRects. 0.83ms/frame at
+1280x800, 20x inside the 60fps budget.
+
+*That the picture is real.* It is very easy to ship a visualization that
+animates convincingly while rendering a stale or all-zero buffer.
+`tests/probe-capture.mjs` runs the same generation with and without the
+probe and requires bit-identical logits and KV cache (the probe must
+never change the answer), then checks the frame against structural facts
+no bug satisfies by accident: all 30 layers distinct, none saturated,
+attention causal and normalized, and the whole frame reproducible.
+
+**Two bugs the browser pane could not have shown, and one it caused.**
+The camera was allowed to park *past* the token band, below the last
+layer the worker had produced, so the screen went empty whenever
+generation outpaced nothing at all. And token arrivals were timed with
+`performance.now()` while playback advanced on the render loop's clock --
+the same thing in the app, but comparing incomparable numbers the instant
+anything drives the loop differently, which pinned the camera to the
+bottom of the stack in the harness. Both were found by
+`tests/viz-harness.html`, which fakes the worker and drives the loop off
+a timer so it runs headless.
+
+The one the environment caused: `visualViewport` reports height 0 while
+an embedding pane is collapsed, `syncViewport()` wrote it through to
+`--vv-height`, and since `.screen` is `overflow: auto` that clipped the
+entire UI to nothing -- page still laid out, `getBoundingClientRect`
+still plausible, every control silently not hit-testing. Same failure
+class as the invisible-overlay bug above, caught the same way
+(`elementFromPoint` on a control's own centre), and now guarded.
+
+**Verifying a canvas with no compositor.** The Browser pane here does not
+composite, which means no screenshots and a frozen `requestAnimationFrame`
+-- and also, note, frozen CSS *transitions*, which made the
+generating-state dimming read as "not applied" until it was re-measured
+with transitions disabled. Canvas 2D draws fine without a compositor
+though, so the page can hand its own pixels back: `tests/shot-server.mjs`
+accepts a `POST /shot` of a `toDataURL()` and writes a PNG. Captures
+composite onto the page background first, because the canvas is
+transparent everywhere it has not drawn and a bare export renders as
+white -- against which a correctly subtle visualization looks invisible.
+
+**Not done, deliberately: pixel-per-matrix-entry density.** The original
+ask described a ~1500x1500 grid, one pixel per matrix entry. What shipped
+gives every entry a large, visible cell instead (96x16 for the 135M mlp
+layer, 128x20 for 360M) -- true 1:1 would be ~40x40px, unreadable as
+"neurons firing." The honest candidate for real pixel density is the
+*attention matrix*: heads x cached positions, which for a mid-conversation
+turn is a real few-hundred-to-1024-wide 2D matrix rather than a
+1536-or-2560-long vector padded up to a target aspect. That's flagged as
+the likely next visualization (per 2026-08-27 conversation) and is worth
+its own session -- notes for picking it back up:
+
+- `probe.js`'s current attention capture (`encodeAttention`) already
+  discards the shape a real matrix visualization would want: it *sums*
+  every head's post-softmax weights into one shared `Float32Array(maxCtx)`
+  scratch buffer (see the `probe.attn` accumulation in
+  `transformer.js`'s `runWithCache`, right after `softmax(scores, ...)`),
+  then max-bins that sum down to a fixed 128 bins. A per-head matrix needs
+  either capturing `scores` per head before it's discarded (nH buffers of
+  length `pos+1` instead of one shared accumulator), or accepting only the
+  summed/binned view and calling it an approximation.
+- `config.num_attention_heads` (nH) and `num_key_value_heads` (nKV) differ
+  under GQA (`ratio = nH/nKV` query heads share each KV head, gotcha 6 in
+  `transformer.js`) -- a real attention-matrix viz needs to decide whether
+  to show all nH query heads or just the nKV distinct K/V streams. 9 query
+  heads / 3 kv heads for 135M, so the honest per-head picture is bigger
+  than it first looks.
+- Frame size scales with context length if captured un-binned (pos+1
+  floats per head per layer), unlike the current fixed-stride frame --
+  worth deciding a cap (e.g. only the most recent N positions, or only the
+  current layer rather than all 30/32 per token) before wiring it through
+  the same one-postMessage-per-token transfer, since a 1024-position
+  x-9-head x 30-layer frame is a different cost profile than the current
+  67KB/token.
+- The rest of the pipeline (transferable frame, endless-tower camera,
+  measure-before-tuning-the-palette discipline, `tests/probe-capture.mjs`'s
+  read-only + structural-fact verification pattern, `tests/viz-harness.html`
+  + `tests/shot-server.mjs` for headless visual iteration) should carry
+  over unchanged -- it's specifically the attention capture in `probe.js`
+  and its consumption in `stack.js`'s `drawAttentionFan` that would need
+  reworking, not the surrounding machinery.

@@ -38,6 +38,25 @@ body {
   overflow: hidden;
 }
 
+/* The activation visualization (js/viz/stack.js). Pinned to the visual
+   viewport exactly like .screen so it stays aligned with the chat on iOS
+   with the keyboard open, and pointer-events:none because it is scenery --
+   the fix.md incident was a transparent full-viewport element swallowing
+   every click, and this is a *second* one, so it never gets to hit-test. */
+#viz {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  top: var(--vv-top, 0px);
+  width: 100%;
+  height: 100vh;
+  height: var(--vv-height, 100dvh);
+  z-index: 0;
+  display: block;
+  pointer-events: none;
+}
+
 /* Faint horizontal scanlines over the whole document. pointer-events:none
    so it never intercepts a click. */
 .scanlines {
@@ -75,6 +94,7 @@ body {
   height: var(--vv-height, 100dvh);
   overflow-y: auto;
   transition: opacity 600ms ease;
+  z-index: 1; /* above #viz */
 }
 
 /* The !important is load-bearing, not laziness. Both screens are
@@ -381,3 +401,49 @@ textarea::placeholder { color: var(--phosphor-dim); }
 
 #stop { background: var(--amber); border-color: var(--amber); }
 #stop:hover { box-shadow: 0 0 14px rgba(255, 180, 84, 0.5); }
+
+/* ------------------------- GENERATING STATE ---------------------------- */
+
+/* While the model is working, the chat gets out of the way of the
+   visualization behind it. Everything that is *history* -- past turns, the
+   sampling controls, the textarea the user cannot type into anyway while
+   disabled -- drops to near-invisible. What stays legible is the only
+   three things still live: the HUD, the reply being written, and Stop.
+
+   Opacity rather than display/visibility so it is a fade rather than a
+   relayout, and so the transcript keeps its scroll position for when it
+   comes back. */
+.bubble,
+.sampling,
+.composer,
+#input {
+  transition: opacity 420ms ease, background-color 420ms ease, border-color 420ms ease;
+}
+
+#chat[data-generating="true"] .bubble:not(.streaming) { opacity: 0.09; }
+#chat[data-generating="true"] .sampling { opacity: 0.1; }
+#chat[data-generating="true"] #input {
+  opacity: 0.09;
+  background: transparent;
+}
+#chat[data-generating="true"] .composer { border-top-color: rgba(75, 240, 122, 0.05); }
+
+/* The two survivors need a backdrop of their own: over a field of firing
+   neurons, text on a transparent background is unreadable no matter how
+   opaque the glyphs are. */
+#chat[data-generating="true"] .hud {
+  background: rgba(6, 8, 10, 0.72);
+  border-bottom-color: rgba(75, 240, 122, 0.3);
+}
+
+#chat[data-generating="true"] .bubble.streaming {
+  background: rgba(6, 8, 10, 0.74);
+  border-color: rgba(75, 240, 122, 0.34);
+  box-shadow: 0 0 26px rgba(6, 8, 10, 0.75);
+}
+
+.hud { transition: background-color 420ms ease, border-color 420ms ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble, .sampling, .composer, #input, .hud { transition: none; }
+}

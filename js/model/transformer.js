@@ -153,7 +153,13 @@ export function forward(tensors, config, tokenIds) {
 // gotcha 20/21.
 // Returns logits at the final new position only (the only one a decode
 // loop ever needs).
-function runWithCache(tensors, config, cache, tokenIds) {
+//
+// `probe` is optional (js/model/probe.js). When present it is handed each
+// layer's activations on the way past, for the background visualization.
+// Only decodeStep() passes one -- prefillBatched() is the perf-critical
+// path verified against prefillSequential() by tests/prefill-batch.mjs and
+// is left alone, and a prefill is over in well under a second anyway.
+function runWithCache(tensors, config, cache, tokenIds, probe = null) {
   const H = config.hidden_size;
   const L = config.num_hidden_layers;
   const nH = config.num_attention_heads;
@@ -224,6 +230,8 @@ function runWithCache(tensors, config, cache, tokenIds) {
       layerCache.k.set(kBuf, writeOff);
       layerCache.v.set(vBuf, writeOff);
 
+      if (probe) probe.attn.fill(0, 0, pos + 1);
+
       for (let h = 0; h < nH; h++) {
         const kvh = (h / ratio) | 0;
         const qOff = h * headDim;
@@ -235,6 +243,13 @@ function runWithCache(tensors, config, cache, tokenIds) {
           scores[j] = dot * invSqrtHeadDim;
         }
         softmax(scores, pos + 1);
+        // Summed across heads here, while `scores` is still this head's
+        // distribution -- one pass over pos+1 floats against the
+        // pos*headDim*2 the surrounding loop already does, so under 1%.
+        if (probe) {
+          const acc = probe.attn;
+          for (let j = 0; j <= pos; j++) acc[j] += scores[j];
+        }
         const outOff = h * headDim;
         for (let d = 0; d < headDim; d++) attnOut[outOff + d] = 0;
         for (let j = 0; j <= pos; j++) {
@@ -253,6 +268,10 @@ function runWithCache(tensors, config, cache, tokenIds) {
       for (let d = 0; d < I; d++) gateBuf[d] = silu(gateBuf[d]) * upBuf[d];
       linear(mlpOut, wDown, gateBuf, H, I);
       for (let d = 0; d < H; d++) hidden[i][d] += mlpOut[d];
+
+      // After the residual add, so `hidden[i]` is the stream *leaving*
+      // this layer, and before the next iteration overwrites gateBuf.
+      if (probe) probe.captureLayer(l, hidden[i], gateBuf, pos + 1);
     }
   }
 
@@ -280,8 +299,8 @@ export function prefillSequential(tensors, config, cache, tokenIds) {
 // it to the cache at cache.seqLen exactly like a prompt token (gotcha 21).
 // Batching needs >1 token to pay for itself, so decode always goes through
 // the same unbatched path as a length-1 prefill.
-export function decodeStep(tensors, config, cache, tokenId) {
-  return runWithCache(tensors, config, cache, [tokenId]);
+export function decodeStep(tensors, config, cache, tokenId, probe = null) {
+  return runWithCache(tensors, config, cache, [tokenId], probe);
 }
 
 const BATCH = 4;

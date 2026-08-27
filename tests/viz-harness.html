@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!-- Matches index.html. Without it, mobile emulation falls back to the
+     980px default viewport and the phone layout is never exercised. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>viz harness</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #06080a; overflow: hidden; }
+  #viz { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<!--
+  A bench for js/viz/stack.js that needs no model, no worker and no
+  network: it synthesizes activation frames with the same statistics the
+  real probe produces and pushes them at a chosen tokens-per-second.
+
+  It exists because the visualization is the one part of this project that
+  cannot be checked by asserting on numbers, and running the real 135M to
+  look at a frame is a ~30s round trip per tweak. It also drives the render
+  loop off a timer rather than requestAnimationFrame, so it still advances
+  in a background tab -- which is what makes it possible to render a frame
+  and read the pixels back out without a compositing window.
+
+  Open with ?tps=6 to set the token rate. window.harness exposes step() and
+  shot() for driving it from a console.
+-->
+<canvas id="viz"></canvas>
+<script type="module">
+import { createStackViz } from "../js/viz/stack.js";
+
+// The render loop is rAF-driven, and rAF is frozen in a hidden tab. Swap
+// in a timer so the harness runs headless. Must happen before the module
+// schedules its first frame.
+let clock = 0;
+const pending = [];
+window.requestAnimationFrame = (fn) => { pending.push(fn); return pending.length; };
+window.cancelAnimationFrame = () => {};
+
+function advance(ms) {
+  clock += ms;
+  const due = pending.splice(0, pending.length);
+  for (const fn of due) fn(clock);
+}
+
+const params = new URLSearchParams(location.search);
+
+// Real frames dumped by tests/dump-frames.mjs, when they are present.
+// Worth the round trip: real SwiGLU activations are far sparser than any
+// obvious synthetic guess (three quarters of all neurons sit in the bottom
+// sixteenth of their layer's range), so a colour ramp tuned against
+// invented data comes out looking like television static.
+let real = null;
+if (params.get("real") !== "0") {
+  try {
+    const meta = await (await fetch("shots/frames.json")).json();
+    const bin = new Uint8Array(await (await fetch("shots/frames.bin")).arrayBuffer());
+    real = { meta, bin };
+  } catch { /* fall back to synthetic */ }
+}
+
+const LAYERS = real ? real.meta.layers : Number(params.get("layers") || 30);
+const MLP = real ? real.meta.mlpCells : Number(params.get("mlp") || 1536);
+const RESID = real ? real.meta.residCells : Number(params.get("resid") || 576);
+const ATTN = real ? real.meta.attnBins : 128;
+const STRIDE = MLP + RESID + ATTN;
+
+const viz = createStackViz(document.getElementById("viz"));
+viz.configure({ layers: LAYERS, mlpCells: MLP, residCells: RESID, attnBins: ATTN, stride: STRIDE });
+
+// Deterministic PRNG so a captured frame is reproducible across runs.
+let seed = 12345;
+const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+
+// Matches what js/model/probe.js emits: bytes centred on 128, heavy-tailed
+// (most neurons near zero, a few far out), normalized per layer so exactly
+// one cell sits on the 127 rail. Attention is spiky and causal-looking,
+// with the sink at position 0 that real transformers always show.
+function makeFrame(index, pos, text) {
+  const bytes = new Uint8Array(LAYERS * STRIDE);
+  for (let l = 0; l < LAYERS; l++) {
+    const base = l * STRIDE;
+    const sparsity = 2.4 + (l / LAYERS) * 2.2;
+    let peak = 0, peakAt = 0;
+    for (let c = 0; c < MLP; c++) {
+      const u = rnd();
+      const mag = Math.pow(u, sparsity);
+      const sign = rnd() < 0.62 ? 1 : -1;
+      const q = Math.round(mag * 127) * sign;
+      bytes[base + c] = 128 + q;
+      if (Math.abs(q) > peak) { peak = Math.abs(q); peakAt = c; }
+    }
+    bytes[base + peakAt] = 128 + 127;
+
+    let rpeak = 0, rpeakAt = 0;
+    for (let c = 0; c < RESID; c++) {
+      const v = Math.sin(c * 0.11 + l * 0.7) * 0.5 + (rnd() - 0.5) * 0.8;
+      const q = Math.max(-127, Math.min(127, Math.round(v * 110)));
+      bytes[base + MLP + c] = 128 + q;
+      if (Math.abs(q) > rpeak) { rpeak = Math.abs(q); rpeakAt = c; }
+    }
+    bytes[base + MLP + rpeakAt] = 128 + 127;
+
+    const bins = Math.min(pos + 1, ATTN);
+    let apeak = 0, apeakAt = 0;
+    for (let b = 0; b < bins; b++) {
+      let w = Math.pow(rnd(), 6) * 0.5;
+      if (b === 0) w += 0.9;                       // attention sink
+      if (b === bins - 1) w += 0.7;                // self
+      if (b === ((l * 7) % bins)) w += 0.8;        // a layer-specific focus
+      const v = Math.min(255, Math.round(w * 255));
+      bytes[base + MLP + RESID + b] = v;
+      if (v > apeak) { apeak = v; apeakAt = b; }
+    }
+    bytes[base + MLP + RESID + apeakAt] = 255;
+  }
+  return { bytes, attnUsed: Math.min(pos + 1, ATTN), pos, text };
+}
+
+const WORDS = [" The", " model", " reads", " every", " token", " at", " once", ".",
+               " Attention", " is", " all", " you", " need", "\n"];
+
+function nextFrame(index, pos, text) {
+  if (!real) return makeFrame(index, pos, text);
+  const i = index % real.meta.count;
+  const size = LAYERS * STRIDE;
+  return {
+    bytes: real.bin.slice(i * size, (i + 1) * size),
+    attnUsed: real.meta.attnUsed[i],
+    pos: real.meta.pos[i],
+    text: real.meta.texts[i],
+  };
+}
+
+let token = 0;
+let pos = 213;
+const tps = Number(params.get("tps") || 6);
+const tokenMs = 1000 / tps;
+
+viz.start();
+
+// Feed tokens and frames on the same virtual clock the renderer sees, so a
+// captured frame is a function of the requested rate rather than of how
+// fast this machine happens to run.
+let sinceToken = 0;
+function step(ms) {
+  const SLICE = 8;
+  for (let t = 0; t < ms; t += SLICE) {
+    sinceToken += SLICE;
+    if (sinceToken >= tokenMs) {
+      sinceToken -= tokenMs;
+      viz.push(nextFrame(token, pos++, WORDS[token % WORDS.length]));
+      token++;
+    }
+    advance(SLICE);
+  }
+}
+
+// The canvas is transparent everywhere it has not drawn -- in the app the
+// black comes from <body> behind it. Exporting the canvas alone produces a
+// PNG whose background renders as white, which makes a correctly dim
+// visualization look washed out and a correctly subtle one look invisible.
+// Composite onto the real page colour so what gets captured is what a
+// viewer would see.
+function shot() {
+  const src = document.getElementById("viz");
+  const out = document.createElement("canvas");
+  out.width = src.width;
+  out.height = src.height;
+  const g = out.getContext("2d");
+  g.fillStyle = "#06080a";
+  g.fillRect(0, 0, out.width, out.height);
+  g.drawImage(src, 0, 0);
+  return out.toDataURL("image/png");
+}
+
+window.harness = {
+  step,
+  stop: () => viz.stop(),
+  shot,
+  state: () => ({ token, pos, clock }),
+};
+</script>
+</body>
+</html>

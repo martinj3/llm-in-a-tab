@@ -20,6 +20,7 @@ import { renderSystemTurn, renderUserTurn, renderTurnClose } from "./model/templ
 import { createKVCache } from "./model/kvcache.js";
 import { prefill, decodeStep } from "./model/transformer.js";
 import { sampleToken } from "./model/sample.js";
+import { createProbe } from "./model/probe.js";
 
 const DTYPE = "i8";
 
@@ -32,12 +33,21 @@ const MAX_CTX = 1024;
 // than accepted and then truncated mid-reply.
 const REPLY_RESERVE = 256;
 
-let model = null; // { modelId, config, tensors, tokenizer, cache, pendingPrefix }
+let model = null; // { modelId, config, tensors, tokenizer, cache, pendingPrefix, probe }
 let stopRequested = false;
 let generating = false;
 
+// Owned by the main thread (the user can switch the visualization off in
+// the composer). When false the probe is never handed to decodeStep, so
+// the forward pass runs exactly as it did before this existed.
+let vizEnabled = true;
+
 function post(message) {
   self.postMessage(message);
+}
+
+function postTransfer(message, transfer) {
+  self.postMessage(message, transfer);
 }
 
 function log(text) {
@@ -150,7 +160,8 @@ async function handleLoad({ modelId }) {
       `(${(prefillMs / systemIds.length).toFixed(0)}ms/token).`
   );
 
-  model = { modelId, config, tensors, tokenizer, cache, pendingPrefix: "" };
+  const probe = createProbe(config, MAX_CTX);
+  model = { modelId, config, tensors, tokenizer, cache, pendingPrefix: "", probe };
 
   post({
     type: "ready",
@@ -159,13 +170,17 @@ async function handleLoad({ modelId }) {
     seqLen: cache.seqLen,
     maxCtx: MAX_CTX,
     residentMB: residentMB(),
+    // Frame layout for the visualization. Sent once here rather than with
+    // every token: it is fixed by the architecture and the renderer needs
+    // it to reshape a flat frame into grids.
+    viz: probe.geometry,
   });
   status("Ready");
 }
 
 async function handleGenerate({ text, temperature, topP, maxNewTokens }) {
   if (!model) throw new Error("No model loaded.");
-  const { config, tensors, tokenizer, cache } = model;
+  const { config, tensors, tokenizer, cache, probe } = model;
 
   const turnText = model.pendingPrefix + renderUserTurn(text);
   const turnIds = tokenizer.encode(turnText);
@@ -230,7 +245,25 @@ async function handleGenerate({ text, temperature, topP, maxNewTokens }) {
     const piece = decoder.push(tokenId);
     generated++;
 
-    logits = decodeStep(tensors, config, cache, tokenId);
+    const watching = vizEnabled;
+    if (watching) probe.beginToken();
+    logits = decodeStep(tensors, config, cache, tokenId, watching ? probe : null);
+    if (watching) {
+      // The forward pass that just ran was *of* this token, so the frame
+      // and the text belong together -- which is what lets the renderer
+      // caption each pass of the tower with the token it processed.
+      const frame = probe.endToken();
+      postTransfer(
+        {
+          type: "activations",
+          bytes: frame.bytes,
+          attnUsed: frame.attnUsed,
+          pos: cache.seqLen - 1,
+          text: piece,
+        },
+        [frame.bytes.buffer]
+      );
+    }
 
     // seqLen/tok-s are worth showing live rather than only once the reply
     // finishes -- a reply can run tens of seconds on a phone, and "ctx --/--"
@@ -281,6 +314,14 @@ self.onmessage = async (event) => {
   // yieldToMessages() await, not queued behind it.
   if (message.type === "stop") {
     if (generating) stopRequested = true;
+    return;
+  }
+
+  // Same reasoning as "stop": toggling the visualization mid-reply has to
+  // land while the generate handler is parked at yieldToMessages(), not
+  // after the whole reply has finished.
+  if (message.type === "viz") {
+    vizEnabled = message.enabled;
     return;
   }
 

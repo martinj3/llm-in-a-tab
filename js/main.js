@@ -4,6 +4,7 @@
 // operation to sneak onto the UI thread.
 import { MODELS } from "./models.js";
 import { getManifest } from "./model/store.js";
+import { createStackViz } from "./viz/stack.js";
 
 const DTYPE = "i8";
 
@@ -22,6 +23,7 @@ const temperatureSlider = document.getElementById("temperature");
 const topPSlider = document.getElementById("top-p");
 const temperatureOut = document.getElementById("temperature-out");
 const topPOut = document.getElementById("top-p-out");
+const vizToggle = document.getElementById("viz-toggle");
 
 const hud = {
   model: document.getElementById("hud-model"),
@@ -39,15 +41,48 @@ const hud = {
 // of view with it. window.visualViewport reports the part of the page
 // actually visible above the keyboard, so screens are pinned to that
 // instead of to 100vh.
+// A zero height is never a viewport worth honouring, but it is a value
+// visualViewport really does report -- while the tab is hidden, and while
+// an embedding pane is still collapsed. Writing it through sets .screen to
+// height:0, and since .screen is overflow:auto that clips the entire UI to
+// nothing: the page still lays out, getBoundingClientRect still returns
+// plausible rects, and every control silently stops hit-testing. Same
+// class of failure as the invisible-overlay bug in fix.md, so it gets the
+// same treatment -- keep the last good size and let the next real resize
+// correct it.
 function syncViewport() {
   const vv = window.visualViewport;
-  if (!vv) return;
+  if (!vv || vv.height <= 0) return;
   document.documentElement.style.setProperty("--vv-height", `${vv.height}px`);
   document.documentElement.style.setProperty("--vv-top", `${vv.offsetTop}px`);
 }
 window.visualViewport?.addEventListener("resize", syncViewport);
 window.visualViewport?.addEventListener("scroll", syncViewport);
 syncViewport();
+
+// --------------------------- visualization ------------------------------
+
+const viz = createStackViz(document.getElementById("viz"));
+
+// The whole thing is a camera falling through a tower, so it is exactly
+// what prefers-reduced-motion is asking about. Default it off there rather
+// than removing the control: the preference is a default, not a ban, and
+// someone who set it system-wide for carousels may still want this.
+if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  vizToggle.checked = false;
+}
+
+function syncViz() {
+  viz.setEnabled(vizToggle.checked);
+  // Tells the worker whether to run the probe at all -- with it off the
+  // forward pass is byte-for-byte what it was before the visualization
+  // existed, which is also what makes the toggle a usable A/B for its
+  // cost on a phone.
+  worker.postMessage({ type: "viz", enabled: vizToggle.checked });
+}
+
+vizToggle.addEventListener("change", syncViz);
+syncViz();
 
 function setMem(residentMB) {
   hud.mem.textContent = residentMB ? `mem ${residentMB.toFixed(0)}MB` : "mem --";
@@ -189,10 +224,14 @@ function scrollTranscript() {
   if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
 }
 
+// Drives both the button swap and the CSS that dims the transcript and
+// composer down to near-nothing, so the visualization behind them has the
+// screen while the model is actually working.
 function setGenerating(isGenerating) {
   sendButton.hidden = isGenerating;
   stopButton.hidden = !isGenerating;
   input.disabled = isGenerating;
+  chat.dataset.generating = isGenerating ? "true" : "false";
 }
 
 function samplingSettings() {
@@ -291,6 +330,7 @@ worker.onmessage = (event) => {
       hud.model.textContent = message.label;
       updateCtx(message.seqLen, message.maxCtx);
       setMem(message.residentMB);
+      viz.configure(message.viz);
       log(`${message.label} ready.`);
       break;
     }
@@ -299,6 +339,11 @@ worker.onmessage = (event) => {
       streamingBubble = addBubble("assistant");
       streamingBubble.classList.add("streaming");
       scrollTranscript();
+      viz.start();
+      break;
+
+    case "activations":
+      viz.push(message);
       break;
 
     case "prefill-done":
@@ -328,6 +373,7 @@ worker.onmessage = (event) => {
       updateCtx(message.seqLen, message.maxCtx);
       stopButton.disabled = false;
       setGenerating(false);
+      viz.stop();
       input.focus();
       break;
     }
@@ -339,6 +385,7 @@ worker.onmessage = (event) => {
       scrollTranscript();
       stopButton.disabled = false;
       setGenerating(false);
+      viz.stop();
       break;
 
     case "error":
@@ -355,6 +402,7 @@ worker.onmessage = (event) => {
         addBubble("system", `Error: ${message.message}`);
         stopButton.disabled = false;
         setGenerating(false);
+        viz.stop();
       }
       break;
   }
