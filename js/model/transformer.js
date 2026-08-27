@@ -155,7 +155,8 @@ export function forward(tensors, config, tokenIds) {
 // loop ever needs).
 //
 // `probe` is optional (js/model/probe.js). When present it is handed each
-// layer's activations on the way past, for the background visualization.
+// head's attention distribution and each layer's activations on the way
+// past, for the background visualization.
 // Only decodeStep() passes one -- prefillBatched() is the perf-critical
 // path verified against prefillSequential() by tests/prefill-batch.mjs and
 // is left alone, and a prefill is over in well under a second anyway.
@@ -230,8 +231,6 @@ function runWithCache(tensors, config, cache, tokenIds, probe = null) {
       layerCache.k.set(kBuf, writeOff);
       layerCache.v.set(vBuf, writeOff);
 
-      if (probe) probe.attn.fill(0, 0, pos + 1);
-
       for (let h = 0; h < nH; h++) {
         const kvh = (h / ratio) | 0;
         const qOff = h * headDim;
@@ -243,13 +242,11 @@ function runWithCache(tensors, config, cache, tokenIds, probe = null) {
           scores[j] = dot * invSqrtHeadDim;
         }
         softmax(scores, pos + 1);
-        // Summed across heads here, while `scores` is still this head's
-        // distribution -- one pass over pos+1 floats against the
-        // pos*headDim*2 the surrounding loop already does, so under 1%.
-        if (probe) {
-          const acc = probe.attn;
-          for (let j = 0; j <= pos; j++) acc[j] += scores[j];
-        }
+        // Captured here, while `scores` is still *this* head's
+        // distribution -- the next head overwrites the buffer. One pass
+        // over pos+1 floats against the pos*headDim*2 the surrounding
+        // loop already does, so under 1%.
+        if (probe) probe.captureHead(l, h, scores, pos + 1);
         const outOff = h * headDim;
         for (let d = 0; d < headDim; d++) attnOut[outOff + d] = 0;
         for (let j = 0; j <= pos; j++) {
@@ -271,7 +268,7 @@ function runWithCache(tensors, config, cache, tokenIds, probe = null) {
 
       // After the residual add, so `hidden[i]` is the stream *leaving*
       // this layer, and before the next iteration overwrites gateBuf.
-      if (probe) probe.captureLayer(l, hidden[i], gateBuf, pos + 1);
+      if (probe) probe.captureLayer(l, hidden[i], gateBuf);
     }
   }
 

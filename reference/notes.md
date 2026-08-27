@@ -658,13 +658,13 @@ named-ops-in-sequence structure existed so activations could be observed
 without a rewrite; that turned out to be true, and the hook is three
 `if (probe)` branches in `runWithCache()`.
 
-**The camera never cuts.** A token is 150ms-1s, so 30 layers get 5-30ms
-each. Cutting to each layer in turn is a strobe, and panning down and
-snapping back to the top once per token is a strobe with extra steps. So
-the tower is endless instead: each token's layers are laid out below the
-last token's, separated by a band naming the token that pass emitted, and
-the camera falls at whatever speed keeps it ~0.75 tokens behind the
-worker. The descent rate is therefore an honest readout of tok/s.
+**The camera never cuts.** A token is 150ms-1s. Cutting to each layer in
+turn is a strobe, and panning down and snapping back to the top once per
+token is a strobe with extra steps. So the tower is endless instead: each
+token's plates are laid out below the last token's, separated by a band
+naming the token that pass emitted, and the camera falls. (How *far* it
+falls per token is a separate question, revisited below once attention
+plates doubled the plate count.)
 
 **Three things had to be measured rather than guessed.**
 
@@ -688,7 +688,7 @@ animates convincingly while rendering a stale or all-zero buffer.
 probe and requires bit-identical logits and KV cache (the probe must
 never change the answer), then checks the frame against structural facts
 no bug satisfies by accident: all 30 layers distinct, none saturated,
-attention causal and normalized, and the whole frame reproducible.
+every layer normalized to its own peak, and the whole frame reproducible.
 
 **Two bugs the browser pane could not have shown, and one it caused.**
 The camera was allowed to park *past* the token band, below the last
@@ -720,43 +720,119 @@ composite onto the page background first, because the canvas is
 transparent everywhere it has not drawn and a bare export renders as
 white -- against which a correctly subtle visualization looks invisible.
 
-**Not done, deliberately: pixel-per-matrix-entry density.** The original
-ask described a ~1500x1500 grid, one pixel per matrix entry. What shipped
-gives every entry a large, visible cell instead (96x16 for the 135M mlp
-layer, 128x20 for 360M) -- true 1:1 would be ~40x40px, unreadable as
-"neurons firing." The honest candidate for real pixel density is the
-*attention matrix*: heads x cached positions, which for a mid-conversation
-turn is a real few-hundred-to-1024-wide 2D matrix rather than a
-1536-or-2560-long vector padded up to a target aspect. That's flagged as
-the likely next visualization (per 2026-08-27 conversation) and is worth
-its own session -- notes for picking it back up:
 
-- `probe.js`'s current attention capture (`encodeAttention`) already
-  discards the shape a real matrix visualization would want: it *sums*
-  every head's post-softmax weights into one shared `Float32Array(maxCtx)`
-  scratch buffer (see the `probe.attn` accumulation in
-  `transformer.js`'s `runWithCache`, right after `softmax(scores, ...)`),
-  then max-bins that sum down to a fixed 128 bins. A per-head matrix needs
-  either capturing `scores` per head before it's discarded (nH buffers of
-  length `pos+1` instead of one shared accumulator), or accepting only the
-  summed/binned view and calling it an approximation.
-- `config.num_attention_heads` (nH) and `num_key_value_heads` (nKV) differ
-  under GQA (`ratio = nH/nKV` query heads share each KV head, gotcha 6 in
-  `transformer.js`) -- a real attention-matrix viz needs to decide whether
-  to show all nH query heads or just the nKV distinct K/V streams. 9 query
-  heads / 3 kv heads for 135M, so the honest per-head picture is bigger
-  than it first looks.
-- Frame size scales with context length if captured un-binned (pos+1
-  floats per head per layer), unlike the current fixed-stride frame --
-  worth deciding a cap (e.g. only the most recent N positions, or only the
-  current layer rather than all 30/32 per token) before wiring it through
-  the same one-postMessage-per-token transfer, since a 1024-position
-  x-9-head x 30-layer frame is a different cost profile than the current
-  67KB/token.
-- The rest of the pipeline (transferable frame, endless-tower camera,
-  measure-before-tuning-the-palette discipline, `tests/probe-capture.mjs`'s
-  read-only + structural-fact verification pattern, `tests/viz-harness.html`
-  + `tests/shot-server.mjs` for headless visual iteration) should carry
-  over unchanged -- it's specifically the attention capture in `probe.js`
-  and its consumption in `stack.js`'s `drawAttentionFan` that would need
-  reworking, not the surrounding machinery.
+### Attention plates: the real matrix, at one pixel per entry
+
+Follow-up session, same day. The note above flagged the attention matrix
+as the honest candidate for real pixel density, and that is what shipped.
+Every layer now contributes **two** plates, in the order the block runs
+them: an ATTN plate and then the MLP plate that was already there.
+
+**What the ATTN plate is.** Rows are query heads, columns are cached
+context positions, and every entry is one post-softmax weight the model
+actually used for this token -- `heads x (pos+1)`, un-binned. At a
+200-token context that is 9x200 for the 135M and 15x200 for the 360M; at
+the 1024 ceiling it is 9,216 and 15,360 weights per layer per token. The
+renderer paints them one byte to one pixel of an offscreen image and never
+scales that image *down*, so at most one matrix entry lands on one screen
+pixel. The old 128-bin head-summed vector is gone; the fan above the plate
+is now derived from the same matrix (max over heads per column), so the
+fan and the plate cannot disagree.
+
+**Two encoding decisions, both in `probe.js` and both load-bearing.**
+
+*Per-head own-peak normalization.* Heads differ in concentration by orders
+of magnitude -- some put 0.9 of their mass on one position, others spread
+0.002 across five hundred. A shared scale renders every diffuse head as a
+black row. Same argument `encodeSigned` already made per layer.
+
+*Square root in the quantizer, not in the palette.* Real attention is
+dominated by the sink at position 0. Under a linear 8-bit scale the entire
+rest of the row -- local window, induction spikes, the actual content of
+the picture -- lands in bytes 0-3 and is gone before the renderer sees it.
+Shaping in the palette could not recover what quantization threw away.
+Storing `sqrt(w/peak)` is a precision decision that happens to also be the
+right display curve.
+
+**Frame size now varies per token**, because the attention block grows
+with the context. `stride` and `cols` travel in the `activations` message
+instead of in the one-shot geometry; the probe sizes each token's buffer
+from `cache.seqLen + 1`. 73KB/token for the 135M at a 42-token context,
+~340KB at the 1024 ceiling; 130KB / ~590KB for the 360M. Transferable, so
+the cost is the allocation, not a copy.
+
+**The pacing had to be rebuilt, and this is the important part.** Thirty
+layers is sixty plates. At 6 tok/s that is 2.7ms per plate -- a sixth of
+one 60Hz frame. The previous design, which honestly visited every layer of
+every token, was therefore crossing ~6 plates between two rendered frames:
+consecutive frames showed unrelated layers. That was already true at 31
+plates per token before attention doubled it; adding attention just made
+it impossible to ignore. Worse, it got *worse the faster the model ran*,
+which is exactly backwards.
+
+So the descent rate is now the fixed thing and the depth per token is the
+variable one. Each token contributes a run of plates long enough to take
+~110ms each at the measured token time -- one layer at 6 tok/s, four at
+the 360M's ~1 tok/s -- and the next token's run picks up at the layer where
+the last one stopped, wrapping at the end of the model. Nothing is faked:
+every plate is real data from the token whose band follows it, at the layer
+its label names, the token band is captioned with the layer range its run
+covered (`token " starting"  L21-L24`), and the STACK rail brackets that
+range so you can watch it walk down the model and wrap. What is lost is
+the guarantee that one token means one lap of the tower. What is gained is
+a fall you can actually watch, and the faster the model runs the more of
+the model streams past per second.
+
+Two smaller consequences of the same arithmetic: the token band no longer
+gets a slot of its own (at a one-layer run, a band that cost a slot would
+leave the screen empty a third of the time -- it is drawn *between* two
+plates now), and the camera parks 0.85 plates short of the newest one
+rather than exactly on it, because sitting on the floor puts the bottom
+third of the screen in a stack the worker has not produced yet, and at
+6 tok/s the camera reaches that floor most of the time.
+
+**A real bug the test caught, and a real model fact it caught next.**
+`(255 * Math.sqrt(x)) | 0` truncates, and `peak * (1/peak)` is 1 give or
+take one ulp -- so on some rows the peak quantized to 254 instead of 255,
+silently violating the own-peak invariant everything downstream assumes.
+Rounding fixed it. Then the strengthened test failed on 360M layer 18 for
+a *non*-bug: two heads produced byte-identical rows because both collapse
+onto the sink so completely that 41 of 42 positions quantize to zero. The
+assertion was weakened from "all rows distinct" to "no layer uniform, and
+>=85% distinct overall", and every duplicate now prints with how
+sink-dominated it was -- so the tolerance cannot hide a real collapse.
+478/480 rows distinct on the 360M, 270/270 on the 135M.
+
+**Verification, end to end.** `tests/probe-capture.mjs` still requires
+bit-identical logits and KV cache with the probe attached (0.000e+0 on
+both models), and now also checks that the bytes decode back to a
+probability distribution: squaring recovers `w/peak`, so a row sums to
+`1/peak`, and softmax over `cols` positions bounds that into `[1, cols]`.
+Measured `[1.00, 22.27]` of a possible 42 on the 360M -- the sharpest head
+puts everything on one position, the most diffuse spreads over ~22. Nothing
+but a real post-softmax vector satisfies that at every layer and head.
+Separately, a throwaway second `Worker` was driven from the live page to
+confirm the wire format: `stride === attnBase + heads*cols`,
+`bytes.length === layers*stride`, `cols` incrementing by one per token, and
+the transferred buffer arriving intact.
+
+**Cost.** 0.47ms/frame at 1280x800 with a 184-column context, 1.59ms at
+the full 1024. Still an order of magnitude inside the 60fps budget.
+
+**Palette.** Attention is amber/gold, MLP stays green -- the two phosphors
+these terminals actually came in, and the tower has to be readable as
+alternating plate types while the camera is falling. Amber collides with
+the negative half of `NEURON_LUT`, but that is a sparse accent inside a
+green field, never a whole plate. The ramps were tuned against a measured
+histogram again (`tests/dump-frames.mjs` now prints attention as well as
+MLP): 80% of attention bytes sit below 1/16 at a 190-token context, with a
+long even tail and 2.4% pinned at the top. Unlike the SwiGLU ramp, which
+has to fight its bulk down, this one wants the tail *visible* -- the middle
+of the context being dark is the picture, and it only reads as "attended
+weakly" rather than "not there" if the floor keeps it faintly lit.
+
+**`tests/dump-frames.mjs` now takes a prompt argument, and its default is
+deliberately wordy.** The attention block is heads x context, so a short
+prompt dumps frames whose attention plates are 40 columns of fat blocks and
+tells you nothing about the pixel-dense case. Tuning against the short
+dump is the same mistake as tuning against invented statistics.

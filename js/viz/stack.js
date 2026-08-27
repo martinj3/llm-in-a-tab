@@ -1,33 +1,66 @@
 // The background visualization: a tower of transformer layers that the
 // camera falls through, one full stack per generated token.
 //
-// Nothing here is decorative noise. Every cell in a layer's grid is one
-// entry of that layer's SwiGLU activation vector for the token being
-// generated, every filament in the fan above it is that layer's
-// head-averaged attention onto a slice of the live context, and the trace
-// below it is the residual stream leaving the layer. The bytes come from
-// js/model/probe.js, one 30- or 32-layer frame per token, and the descent
-// rate is set by measured token time -- so the speed of the fall is an
-// honest readout of tok/s.
+// Nothing here is decorative noise. Each layer contributes two plates,
+// in the order the block computes them:
 //
-// WHY THE CAMERA NEVER CUTS. A token takes 150ms-1s, which is 5-30ms per
-// layer. Cutting to each layer in turn at that rate is a strobe, and
-// panning down the stack and then snapping back to the top once per token
-// is a strobe with extra steps. So the tower is treated as endless
-// instead: each token's layers are laid out below the previous token's,
-// separated by a band naming the token that pass emitted, and the camera
-// simply falls at whatever speed keeps it about three-quarters of a token
-// behind the worker. No cuts anywhere, and you watch tokens stream past
-// as you descend.
+//   ATTN -- the real attention matrix for this token. Rows are query
+//           heads, columns are cached context positions, and every entry
+//           is one post-softmax weight the model actually used. One
+//           screen pixel per matrix entry, no binning.
+//   MLP  -- every entry of that layer's SwiGLU activation vector, the
+//           thing interpretability work calls neurons, with the residual
+//           stream leaving the layer traced underneath.
 //
-// EVERYTHING IS drawImage, NOT fillRect. A layer's grid is painted into a
-// tiny offscreen canvas at one device pixel per activation, then blitted
-// with an affine transform and smoothing off. That is one drawImage per
-// layer instead of ~1500 fillRects, which is the difference between this
+// The bytes come from js/model/probe.js, one frame per token, and the
+// descent rate is set by measured token time -- so the speed of the fall
+// is an honest readout of tok/s.
+//
+// WHY THE CAMERA NEVER CUTS. A token takes 150ms-1s. Cutting to each
+// plate in turn at that rate is a strobe, and panning down the stack and
+// then snapping back to the top once per token is a strobe with extra
+// steps. So the tower is treated as endless instead: each token's plates
+// are laid out below the previous token's, separated by a band naming the
+// token that pass emitted, and the camera simply falls. No cuts anywhere,
+// and you watch tokens stream past as you descend.
+//
+// WHY IT DOES NOT SHOW EVERY LAYER OF EVERY TOKEN. It cannot. Thirty
+// layers is sixty plates, and 135M runs at up to 6 tok/s, which is 2.7ms
+// per plate -- a sixth of one 60Hz frame. A camera that honestly visited
+// all of them would cross six plates between two rendered frames, and
+// consecutive frames would show unrelated layers: a strobe, and one that
+// is *worse* the faster the model runs, which is exactly backwards.
+//
+// So the descent rate is the fixed thing and the depth per token is the
+// variable one. Each token contributes a run of plates long enough to
+// take about PLATE_MS each at the measured token time -- one layer per
+// token at 6 tok/s, four or five at the 360M's ~1 tok/s -- and the next
+// token's run picks up at the layer where the last one stopped, wrapping
+// at the end of the model. Nothing is faked: every plate is real data
+// from the token whose band follows it, at the layer its label names, and
+// the STACK rail shows which slice of the model is currently on screen.
+// What you lose is the guarantee that one token means one lap of the
+// tower. What you get is a fall you can actually watch, and the faster
+// the model runs the more of the model streams past per second, which is
+// the right way round.
+//
+// EVERYTHING IS drawImage, NOT fillRect. A plate is painted into a tiny
+// offscreen canvas at one device pixel per value, then blitted with an
+// affine transform and smoothing off. That is one drawImage per plate
+// instead of thousands of fillRects, which is the difference between this
 // being free on a phone and it being the reason the phone gets hot.
-import { NEURON_LUT, COLORS } from "./palette.js";
+import { NEURON_LUT, ATTN_LUT, COLORS } from "./palette.js";
 
-const GAP = 1; // layer slots between one token's stack and the next
+// The token band is drawn *between* two plates rather than being given a
+// slot of its own. At 6 tok/s a run is one layer -- two plates -- so a
+// band that cost a slot would leave the camera staring at an empty screen
+// a third of the time.
+const GAP = 0;
+// Target time on screen for one plate. The whole pacing scheme exists to
+// hold this roughly constant whatever the model's token rate: at 90-130ms
+// a plate is a thing you see rather than a frame you miss, and the camera
+// moves a legible fraction of the gap between plates each frame.
+const PLATE_MS = 110;
 const EDGE_SLICES = 6; // depth of the extruded side face, in layers
 const SLOPE_Y = 0.05; // grid tips down to the right
 const SLOPE_X = 0.34; // rows lean right as they descend
@@ -37,7 +70,13 @@ const SLOPE_X = 0.34; // rows lean right as they descend
 // it was the top 0.08%, or one.
 const HOT_BYTE = 192;
 const MAX_HOT = 40;
-const DRAW_SPAN = 2; // layer slots drawn either side of the camera
+// Plate slots drawn either side of the camera. Three, not two, because a
+// layer is now two plates: at two you can never see a whole layer plus
+// its neighbours, which is the shape the tower is supposed to have.
+const DRAW_SPAN = 3;
+const ATTN_ROW_PX = 15; // height of one head's row, desktop
+const ATTN_ROW_PX_COMPACT = 10;
+const FAN_FILAMENTS = 128;
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
@@ -79,12 +118,18 @@ export function createStackViz(canvas) {
   const ctx = canvas.getContext("2d");
   const bloom = makeBloom(64);
 
-  let cfg = null; // { layers, mlpCells, residCells, attnBins, stride }
-  let slot = 0; // layers + GAP: one token's worth of tower
+  let cfg = null; // { layers, mlpCells, residCells, heads, maxCols, attnBase }
+  let plates = 0; // 2 * layers: one lap of the model, attn+mlp per layer
   let grid = { w: 0, h: 0 };
   let cellCanvas = null;
   let cellCtx = null;
   let cellImage = null;
+  let attnCanvas = null;
+  let attnCtx = null;
+  let attnImage = null;
+  // Max over heads per column, reused by the fan and the sink/focus
+  // markers so the heads x context pass happens once per plate.
+  let profile = null;
 
   let dpr = 1;
   let W = 0;
@@ -92,8 +137,9 @@ export function createStackViz(canvas) {
   let compact = false;
 
   const frames = []; // newest last, pruned to what the camera still needs
-  let nextIndex = 0;
-  let camG = 0; // camera position, in layer slots, monotonically increasing
+  let nextBase = 0; // global slot where the next token's run starts
+  let nextStart = 0; // plate index within the model where it picks up
+  let camG = 0; // camera position, in plate slots, monotonically increasing
   let arrivalEma = 380; // ms per token, smoothed
   let lastArrival = 0;
   // Token arrivals are timed against the same clock the render loop
@@ -131,8 +177,10 @@ export function createStackViz(canvas) {
     // Portrait phones get a much squarer grid. A 6:1 ribbon works on a wide
     // desktop, where it reads as one of the stacked plates of a tower, but
     // on a 375px-wide screen it is a 120px-tall sliver adrift in a very tall
-    // viewport. 1536 cells resolve to 96x16 on desktop and 48x32 here.
-    grid = gridDims(cfg.mlpCells, compact ? 1.6 : 6);
+    // viewport. 1536 cells resolve to 96x16 on desktop and 64x24 here,
+    // which comes out very close to square cells at phone widths without
+    // making the plate so tall that its attention plate has nowhere to go.
+    grid = gridDims(cfg.mlpCells, compact ? 2.6 : 6);
     if (!cellCanvas) {
       cellCanvas = document.createElement("canvas");
       cellCtx = cellCanvas.getContext("2d");
@@ -144,17 +192,47 @@ export function createStackViz(canvas) {
     }
   }
 
+  // Sized once at the ceiling rather than per frame, because the frame's
+  // width grows with the conversation and reallocating an ImageData every
+  // token would churn a megabyte a second. Only the used sub-rect is ever
+  // uploaded or blitted.
+  function layoutAttn() {
+    if (!attnCanvas) {
+      attnCanvas = document.createElement("canvas");
+      attnCtx = attnCanvas.getContext("2d");
+    }
+    if (attnCanvas.width !== cfg.maxCols || attnCanvas.height !== cfg.heads) {
+      attnCanvas.width = cfg.maxCols;
+      attnCanvas.height = cfg.heads;
+      attnImage = attnCtx.createImageData(cfg.maxCols, cfg.heads);
+    }
+    profile = new Float32Array(cfg.maxCols);
+  }
+
   // ------------------------------- data ---------------------------------
 
   function configure(geometry) {
     cfg = geometry;
-    slot = cfg.layers + GAP;
+    plates = cfg.layers * 2;
     frames.length = 0;
-    nextIndex = 0;
+    nextBase = 0;
+    nextStart = 0;
     camG = 0;
     lastArrival = 0;
     arrivalEma = 380;
     layoutGrid();
+    layoutAttn();
+  }
+
+  // How many plates this token's run gets: as many as fit at PLATE_MS
+  // apiece in the time the last token took, minus the slot the token band
+  // costs. Rounded down to a whole number of layers so a run never ends
+  // between a layer's attention and its MLP, and never fewer than one
+  // layer or more than the whole model.
+  function runLength() {
+    const budget = Math.round(arrivalEma / PLATE_MS) - GAP;
+    const even = budget - (budget % 2);
+    return clamp(even, 2, plates);
   }
 
   function push(msg) {
@@ -176,36 +254,65 @@ export function createStackViz(canvas) {
     // dozens of frames as the camera passes it.
     const energy = new Float32Array(cfg.layers);
     for (let l = 0; l < cfg.layers; l++) {
-      const base = l * cfg.stride;
+      const base = l * msg.stride;
       let sum = 0;
       for (let c = 0; c < cfg.mlpCells; c++) sum += Math.abs(msg.bytes[base + c] - 128);
       energy[l] = sum / cfg.mlpCells / 127;
     }
 
+    const count = runLength();
     const frame = {
-      index: nextIndex++,
       bytes: msg.bytes,
-      attnUsed: msg.attnUsed,
+      // Both per frame, not per model: the attention block is heads x cols
+      // and cols is the live context length (js/model/probe.js).
+      cols: msg.cols,
+      stride: msg.stride,
       pos: msg.pos,
       text: msg.text,
       energy,
+      base: nextBase, // first slot of this token's run, in tower coordinates
+      start: nextStart, // plate index within the model that run begins at
+      count,
     };
-    if (frames.length === 0) camG = frame.index * slot;
+    // The next run picks up where this one stopped, wrapping at the last
+    // layer, so the descent through the model is continuous across tokens
+    // even though each token only covers part of it.
+    nextStart = (nextStart + count) % plates;
+    nextBase = frame.base + count + GAP;
+    if (frames.length === 0) camG = frame.base;
     frames.push(frame);
     prune();
     if (running) ensureRaf();
   }
 
   function prune() {
-    const oldestNeeded = Math.floor(camG / slot) - 1;
-    while (frames.length > 6 || (frames.length > 1 && frames[0].index < oldestNeeded)) {
-      frames.shift();
-    }
+    const cutoff = camG - DRAW_SPAN - 1;
+    while (frames.length > 1 && frames[0].base + frames[0].count + GAP < cutoff) frames.shift();
+    while (frames.length > 8) frames.shift();
   }
 
-  function frameAt(index) {
-    for (let i = frames.length - 1; i >= 0; i--) if (frames[i].index === index) return frames[i];
+  // What lives at tower slot `g`: a plate of some token's run, or nothing
+  // yet. `last` marks the final plate of a run, which is where the token
+  // band gets drawn.
+  function plateFor(g) {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const f = frames[i];
+      if (g < f.base) continue;
+      if (g >= f.base + f.count) return null; // the worker has not got here yet
+      return {
+        frame: f,
+        plate: (f.start + (g - f.base)) % plates,
+        last: g === f.base + f.count - 1,
+      };
+    }
     return null;
+  }
+
+  // The inclusive layer range a run covers, for captions.
+  function runLayers(frame) {
+    const first = frame.start >> 1;
+    const lastPlate = (frame.start + frame.count - 1) % plates;
+    return { first, last: lastPlate >> 1 };
   }
 
   // ----------------------------- animation ------------------------------
@@ -221,28 +328,35 @@ export function createStackViz(canvas) {
     // stalled at a wall with nothing below it. The catch-up term drains a
     // backlog (a fast burst of tokens) without ever running the camera
     // backwards.
-    // The floor is the newest token's *last layer*, not the end of its
-    // slot. The gap after it holds the token band, and descending past
-    // that means descending into a stack the worker has not produced yet:
-    // the camera parks below the band with nothing under it and the screen
-    // goes empty. Stopping on the last real layer means a stall looks like
-    // waiting on a layer, which is what is actually happening.
+    // The floor is the newest run's last plate. Below it is a stack the
+    // worker has not produced yet, so descending past it parks the camera
+    // over nothing at all. Stopping there means a stall looks like waiting
+    // on a layer, which is what is actually happening.
     const newest = frames[frames.length - 1];
-    const maxG = newest.index * slot + cfg.layers - 1;
-    const behind = (maxG - camG) / slot;
+    const maxG = newest.base + newest.count - 1;
+    const span = newest.count + GAP;
+    const behind = (maxG - camG) / span;
     const factor = 1 + Math.max(0, behind - 0.75) * 0.9;
-    const speed = (slot / Math.max(arrivalEma, 80)) * factor;
-    camG = Math.min(camG + speed * dt, maxG);
+    // span/arrivalEma is PLATE_MS by construction, give or take the
+    // rounding in runLength(); expressing it this way keeps the camera
+    // locked to the worker rather than to a constant that would drift.
+    const speed = (span / Math.max(arrivalEma, 80)) * factor;
+    // Parked just short of the newest plate rather than on it. Sitting
+    // exactly on the floor puts the bottom third of the screen in the
+    // stack the worker has not produced yet, and at 6 tok/s the camera
+    // reaches that floor most of the time -- so the steady state would be
+    // a screen that is empty below the middle.
+    camG = Math.min(camG + speed * dt, Math.max(maxG - 0.85, frames[0].base));
     prune();
   }
 
   // ----------------------------- rendering ------------------------------
 
-  // Paints one layer's activation bytes into the offscreen cell canvas,
-  // one device pixel per neuron.
+  // Paints one layer's MLP activation bytes into the offscreen cell
+  // canvas, one device pixel per neuron.
   function paintCells(frame, layer) {
     const px = cellImage.data;
-    const base = layer * cfg.stride;
+    const base = layer * frame.stride;
     const n = cfg.mlpCells;
     for (let c = 0; c < n; c++) {
       const o = frame.bytes[base + c] * 4;
@@ -258,13 +372,83 @@ export function createStackViz(canvas) {
     cellCtx.putImageData(cellImage, 0, 0);
   }
 
+  // Paints one layer's attention matrix -- heads down, context across --
+  // and returns how many columns wide the result is.
+  //
+  // One byte becomes one pixel of the offscreen image, and the offscreen
+  // image is never scaled *down* on the way to the screen: the column
+  // count is capped at the plate's width in device pixels, so at most one
+  // matrix entry lands on one pixel. Above that cap columns are pooled
+  // with max rather than dropped, because a dropped column loses a spike
+  // outright and the spikes are the picture. In practice the cap does not
+  // bite -- 1024 positions against a 1500px plate at dpr 2 is 3000 device
+  // pixels of room, and a phone at dpr 2 has 640 for a context that is
+  // rarely that long.
+  function paintAttn(frame, layer) {
+    const rows = cfg.heads;
+    const src = frame.cols;
+    const out = Math.min(src, Math.max(64, Math.floor(plateWidth() * dpr)));
+    const px = attnImage.data;
+    const rowStride = attnImage.width * 4;
+    const base = layer * frame.stride + cfg.attnBase;
+
+    for (let r = 0; r < rows; r++) {
+      const from = base + r * src;
+      let q = r * rowStride;
+      if (out === src) {
+        for (let c = 0; c < out; c++, q += 4) {
+          const o = frame.bytes[from + c] * 4;
+          px[q] = ATTN_LUT[o];
+          px[q + 1] = ATTN_LUT[o + 1];
+          px[q + 2] = ATTN_LUT[o + 2];
+          px[q + 3] = ATTN_LUT[o + 3];
+        }
+      } else {
+        const per = src / out;
+        for (let c = 0; c < out; c++, q += 4) {
+          const lo = (c * per) | 0;
+          const hi = c === out - 1 ? src : ((c + 1) * per) | 0;
+          let v = 0;
+          for (let j = lo; j < hi; j++) {
+            const b = frame.bytes[from + j];
+            if (b > v) v = b;
+          }
+          const o = v * 4;
+          px[q] = ATTN_LUT[o];
+          px[q + 1] = ATTN_LUT[o + 1];
+          px[q + 2] = ATTN_LUT[o + 2];
+          px[q + 3] = ATTN_LUT[o + 3];
+        }
+      }
+    }
+    attnCtx.putImageData(attnImage, 0, 0, 0, 0, out, rows);
+    return out;
+  }
+
+  // Max over heads for each context position, into `profile`. "Is any head
+  // looking here", which is what both the fan and the sink/focus markers
+  // want; a mean would let one sharply-focused head vanish under eight
+  // diffuse ones.
+  function buildProfile(frame, layer) {
+    const cols = frame.cols;
+    const base = layer * frame.stride + cfg.attnBase;
+    for (let c = 0; c < cols; c++) profile[c] = 0;
+    for (let r = 0; r < cfg.heads; r++) {
+      const from = base + r * cols;
+      for (let c = 0; c < cols; c++) {
+        const v = frame.bytes[from + c];
+        if (v > profile[c]) profile[c] = v;
+      }
+    }
+  }
+
   // The affine map from grid space (columns, rows) to screen space. Both
   // shears are small; together they read as a plate turned a few degrees
   // in two axes, which is enough depth cue without the heavy 2:1 isometric
   // squash that would waste half the screen on empty diagonal.
-  function gridMatrix(cx, cy, wPx, hPx) {
-    const a = wPx / grid.w;
-    const d = hPx / grid.h;
+  function gridMatrix(cx, cy, wPx, hPx, gw, gh) {
+    const a = wPx / gw;
+    const d = hPx / gh;
     const b = a * SLOPE_Y;
     const c = d * SLOPE_X;
     // Centre the parallelogram's bounding box on (cx, cy).
@@ -280,11 +464,219 @@ export function createStackViz(canvas) {
     return Math.min(compact ? W * 0.86 : 1500, W * (compact ? 0.86 : 0.78));
   }
 
+  function plateCx() {
+    return W * (compact ? 0.5 : 0.53);
+  }
+
+  function cornersOf(m, gw, gh) {
+    const P = (gx, gy) => [m.ox + m.a * gx + m.c * gy, m.oy + m.b * gx + m.d * gy];
+    return [P(0, 0), P(gw, 0), P(gw, gh), P(0, gh)];
+  }
+
+  function outlinePath(corners) {
+    ctx.beginPath();
+    ctx.moveTo(corners[0][0], corners[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
+    ctx.closePath();
+  }
+
+  // Opaque backing under a plate. Without it whatever is behind shows
+  // through every transparent cell of the front face -- which is most of
+  // them, since near-zero values are near-transparent by design -- and the
+  // plate turns into a grey haze instead of a solid object.
+  function fillBacking(corners, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.93;
+    ctx.fillStyle = "#05070a";
+    outlinePath(corners);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ---- attention plate --------------------------------------------------
+
+  function drawAttnSlab(frame, layer, y, s, alpha) {
+    if (!frame.cols) return;
+    const drawCols = paintAttn(frame, layer);
+    const rows = cfg.heads;
+    const wPx = plateWidth() * s;
+    // Height from a fixed row height rather than from the matrix aspect:
+    // the matrix is heads x context, so its true aspect runs from 20:1 to
+    // 100:1 over the course of a conversation and the plate would silently
+    // thin to a hairline as the chat got longer. A head is a row you can
+    // see, whatever the context length.
+    const hPx = rows * (compact ? ATTN_ROW_PX_COMPACT : ATTN_ROW_PX) * s;
+    const m = gridMatrix(plateCx(), y, wPx, hPx, drawCols, rows);
+    const corners = cornersOf(m, drawCols, rows);
+    const focused = s > 0.82;
+
+    fillBacking(corners, alpha);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.transform(m.a, m.b, m.c, m.d, m.ox, m.oy);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(attnCanvas, 0, 0, drawCols, rows, 0, 0, drawCols, rows);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = focused ? COLORS.attnFrame : COLORS.attnFrameDim;
+    ctx.lineWidth = focused ? 1.1 : 0.8;
+    outlinePath(corners);
+    ctx.stroke();
+    // Head separators, so the rows read as nine distinct heads rather than
+    // one texture. Only when they are far enough apart to be lines.
+    const rowPx = (corners[3][1] - corners[0][1]) / rows;
+    if (focused && Math.abs(rowPx) > 6) {
+      ctx.globalAlpha = alpha * 0.28;
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      for (let r = 1; r < rows; r++) {
+        ctx.moveTo(m.ox + m.c * r, m.oy + m.d * r);
+        ctx.lineTo(m.ox + m.a * drawCols + m.c * r, m.oy + m.b * drawCols + m.d * r);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    if (!focused) return;
+    buildProfile(frame, layer);
+    drawAttentionFan(frame, corners, alpha, s);
+    drawContextMarkers(frame, m, corners, drawCols, rows, alpha);
+    drawPlateLabel(
+      corners,
+      alpha,
+      `L${String(layer).padStart(2, "0")} ATTN`,
+      `${cfg.heads}h x ${frame.cols} ctx  ${(cfg.heads * frame.cols).toLocaleString()} weights`,
+      COLORS.attnLabel,
+      COLORS.attnLabelDim
+    );
+  }
+
+  // Two verticals through the plate. Position 0 is the attention sink --
+  // every head dumps mass there and it means nothing positional, so it is
+  // marked and then discounted. The bright one is the strongest position
+  // that is *not* the sink, which is the one that says what this layer is
+  // actually reading.
+  function drawContextMarkers(frame, m, corners, drawCols, rows, alpha) {
+    const cols = frame.cols;
+    let focusAt = -1;
+    let best = 0;
+    for (let c = 1; c < cols; c++) {
+      if (profile[c] > best) {
+        best = profile[c];
+        focusAt = c;
+      }
+    }
+    const scale = drawCols / cols;
+    const vline = (col, style, width, dash) => {
+      const gx = (col + 0.5) * scale;
+      ctx.beginPath();
+      ctx.setLineDash(dash);
+      ctx.moveTo(m.ox + m.a * gx, m.oy + m.b * gx);
+      ctx.lineTo(m.ox + m.a * gx + m.c * rows, m.oy + m.b * gx + m.d * rows);
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return [m.ox + m.a * gx, m.oy + m.b * gx];
+    };
+
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.65;
+    const sinkTop = vline(0, COLORS.attnLabelDim, 1, [2, 3]);
+    let focusTop = null;
+    if (focusAt > 0 && best > 24) {
+      ctx.globalAlpha = alpha;
+      focusTop = vline(focusAt, COLORS.gold, 1.2, []);
+    }
+
+    ctx.font = "9px ui-monospace, Menlo, Consolas, monospace";
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.fillStyle = COLORS.attnLabelDim;
+    ctx.fillText("sink", sinkTop[0] + 3, sinkTop[1] - 3);
+    if (focusTop) {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = COLORS.gold;
+      ctx.fillText(`focus ${focusAt}`, focusTop[0] + 3, focusTop[1] - 3);
+    }
+    ctx.restore();
+  }
+
+  // Filaments converging from a rail spanning the context onto the plate
+  // -- the whole context funnelling into the one token being generated.
+  // Sourced from the same per-position profile the markers use, so what
+  // the fan shows and what the matrix shows cannot disagree.
+  //
+  // Batched into alpha tiers so the whole fan is a handful of strokes
+  // rather than one per filament.
+  function drawAttentionFan(frame, corners, alpha, s) {
+    const cols = frame.cols;
+    const n = Math.min(cols, FAN_FILAMENTS);
+    const per = cols / n;
+    const x0 = corners[0][0];
+    const x1 = corners[1][0];
+    const railY = Math.min(corners[0][1], corners[1][1]) - 42 * s;
+    // The focal point rides *on* the plate's top edge rather than at a
+    // fixed height above it. The edge is sheared, so a flat offset leaves
+    // the fan converging in mid-air next to the plate it is feeding.
+    const k = 0.78;
+    const fx = x0 + (x1 - x0) * k;
+    const fy = corners[0][1] + (corners[1][1] - corners[0][1]) * k - 2 * s;
+
+    const TIERS = 5;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let t = TIERS; t >= 1; t--) {
+      const lo = (t - 1) / TIERS;
+      const hi = t / TIERS;
+      ctx.beginPath();
+      let any = false;
+      for (let b = 0; b < n; b++) {
+        const from = (b * per) | 0;
+        const to = b === n - 1 ? cols : ((b + 1) * per) | 0;
+        let peak = 0;
+        for (let j = from; j < to; j++) if (profile[j] > peak) peak = profile[j];
+        const v = peak / 255;
+        if (v < lo || v >= hi || v < 0.06) continue;
+        const rx = x0 + (x1 - x0) * ((b + 0.5) / n);
+        ctx.moveTo(rx, railY);
+        ctx.quadraticCurveTo((rx + fx) / 2, railY + (fy - railY) * 0.68, fx, fy);
+        any = true;
+      }
+      if (!any) continue;
+      // Deliberately near-invisible per filament. There are up to 128 of
+      // them converging on one point under 'lighter', so anything that
+      // reads as a visible line on its own composites into a solid white
+      // wedge where they meet.
+      ctx.strokeStyle = `rgba(${COLORS.fan}, ${(alpha * 0.05 * t).toFixed(3)})`;
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // The rail itself, so the fan reads as reaching across a context
+    // rather than floating.
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.strokeStyle = COLORS.attnLabelDim;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, railY);
+    ctx.lineTo(x1, railY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---- MLP plate --------------------------------------------------------
+
   function drawLayerSlab(frame, layer, y, s, alpha) {
     const wPx = plateWidth() * s;
     const hPx = (wPx / grid.w) * grid.h;
-    const cx = W * (compact ? 0.5 : 0.53);
-    const m = gridMatrix(cx, y, wPx, hPx);
+    const m = gridMatrix(plateCx(), y, wPx, hPx, grid.w, grid.h);
     const focused = s > 0.82;
 
     // Extruded side face: the same layer's predecessors in this same
@@ -307,26 +699,8 @@ export function createStackViz(canvas) {
       }
     }
 
-    const P = (gx, gy) => [m.ox + m.a * gx + m.c * gy, m.oy + m.b * gx + m.d * gy];
-    const corners = [P(0, 0), P(grid.w, 0), P(grid.w, grid.h), P(0, grid.h)];
-    const outline = () => {
-      ctx.beginPath();
-      ctx.moveTo(corners[0][0], corners[0][1]);
-      for (let i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
-      ctx.closePath();
-    };
-
-    // Opaque backing under the front plate. Without it the extruded
-    // slices behind show through every transparent cell of the front face
-    // -- which is most of them, since near-zero activations are near-
-    // transparent by design -- and the layer turns into a grey haze
-    // instead of a solid object with a stack of slices behind it.
-    ctx.save();
-    ctx.globalAlpha = alpha * 0.93;
-    ctx.fillStyle = "#05070a";
-    outline();
-    ctx.fill();
-    ctx.restore();
+    const corners = cornersOf(m, grid.w, grid.h);
+    fillBacking(corners, alpha);
 
     paintCells(frame, layer);
     ctx.save();
@@ -340,24 +714,30 @@ export function createStackViz(canvas) {
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = focused ? COLORS.frame : COLORS.frameDim;
     ctx.lineWidth = focused ? 1.1 : 0.8;
-    outline();
+    outlinePath(corners);
     ctx.stroke();
     ctx.restore();
 
-    if (focused) {
-      drawHotNeurons(frame, layer, m, alpha, wPx / grid.w);
-      drawAttentionFan(frame, layer, corners, alpha, s);
-      drawResidualTrace(frame, layer, corners, alpha, s);
-      drawLayerLabel(frame, layer, corners, alpha);
-    }
-    return corners;
+    if (!focused) return;
+    drawHotNeurons(frame, layer, m, alpha, wPx / grid.w);
+    drawResidualTrace(frame, layer, corners, alpha, s);
+    drawPlateLabel(
+      corners,
+      alpha,
+      `L${String(layer).padStart(2, "0")} MLP`,
+      compact
+        ? `${cfg.mlpCells}n`
+        : `${cfg.mlpCells} neurons  ${grid.w}x${grid.h}  resid ${cfg.residCells}`,
+      COLORS.label,
+      COLORS.labelDim
+    );
   }
 
   // A bloom sprite on the cells above a fixed fraction of the layer's own
   // peak. Capped, because on a layer where everything fires the cap is the
   // difference between a highlight and a white screen.
   function drawHotNeurons(frame, layer, m, alpha, cellPx) {
-    const base = layer * cfg.stride;
+    const base = layer * frame.stride;
     const size = Math.max(9, cellPx * 3.4);
     let drawn = 0;
     ctx.save();
@@ -375,77 +755,17 @@ export function createStackViz(canvas) {
     ctx.restore();
   }
 
-  // Filaments converging from a rail spanning the context onto the token
-  // being generated -- what this layer is reading, and how hard.
-  //
-  // Batched into alpha tiers so the whole fan is a handful of strokes
-  // rather than one per filament.
-  function drawAttentionFan(frame, layer, corners, alpha, s) {
-    const bins = frame.attnUsed;
-    if (!bins) return;
-    const off = layer * cfg.stride + cfg.mlpCells + cfg.residCells;
-    const x0 = corners[0][0];
-    const x1 = corners[1][0];
-    const railY = Math.min(corners[0][1], corners[1][1]) - 96 * s;
-    // The focal point rides *on* the plate's top edge rather than at a
-    // fixed height above it. The edge is sheared, so a flat offset leaves
-    // the fan converging in mid-air next to the layer it is feeding.
-    const k = 0.78;
-    const fx = x0 + (x1 - x0) * k;
-    const fy = corners[0][1] + (corners[1][1] - corners[0][1]) * k - 2 * s;
-
-    const TIERS = 5;
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    for (let t = TIERS; t >= 1; t--) {
-      const lo = (t - 1) / TIERS;
-      const hi = t / TIERS;
-      ctx.beginPath();
-      let any = false;
-      for (let b = 0; b < bins; b++) {
-        const w = frame.bytes[off + b] / 255;
-        const v = Math.pow(w, 0.55);
-        if (v < lo || v >= hi || v < 0.04) continue;
-        const rx = x0 + (x1 - x0) * ((b + 0.5) / bins);
-        ctx.moveTo(rx, railY);
-        ctx.quadraticCurveTo((rx + fx) / 2, railY + (fy - railY) * 0.68, fx, fy);
-        any = true;
-      }
-      if (!any) continue;
-      // Deliberately near-invisible per filament. There are up to 128 of
-      // them converging on one point under 'lighter', so anything that
-      // reads as a visible line on its own composites into a solid white
-      // wedge where they meet.
-      ctx.strokeStyle = `rgba(${COLORS.fan}, ${(alpha * 0.05 * t).toFixed(3)})`;
-      ctx.lineWidth = 0.6;
-      ctx.stroke();
-    }
-    ctx.restore();
-
-    // The rail itself, so the fan reads as reaching across a context
-    // rather than floating.
-    ctx.save();
-    ctx.globalAlpha = alpha * 0.5;
-    ctx.strokeStyle = COLORS.labelDim;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x0, railY);
-    ctx.lineTo(x1, railY);
-    ctx.stroke();
-    ctx.restore();
-  }
-
   // The residual stream leaving the layer, as an oscilloscope trace. It is
   // the one vector every layer writes into and reads back out of, so it
   // gets a different visual language from the neuron grid: a continuous
   // cyan signal under the plate rather than a field of discrete cells.
   function drawResidualTrace(frame, layer, corners, alpha, s) {
-    const base = layer * cfg.stride + cfg.mlpCells;
+    const base = layer * frame.stride + cfg.mlpCells;
     const n = cfg.residCells;
     const x0 = corners[3][0];
     const x1 = corners[2][0];
-    const y0 = Math.max(corners[2][1], corners[3][1]) + 16 * s;
-    const amp = 26 * s;
+    const y0 = Math.max(corners[2][1], corners[3][1]) + 12 * s;
+    const amp = 20 * s;
 
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -467,33 +787,52 @@ export function createStackViz(canvas) {
     ctx.restore();
   }
 
-  function drawLayerLabel(frame, layer, corners, alpha) {
-    const x = corners[3][0];
-    const y = Math.max(corners[2][1], corners[3][1]) + 58;
+  // ---- chrome -----------------------------------------------------------
+
+  // Above the plate's top-left corner, not below it. Below is where the
+  // residual trace and then the token band live, and the vertical budget
+  // between two plates is only about 250px at desktop spacing -- a label
+  // down there gets written over by one or the other.
+  //
+  // Queued rather than drawn in place. The token band closing the previous
+  // run floats at a position that depends on the camera's sub-slot phase,
+  // so it slides across this label about once per plate; drawing every
+  // label last, over its own backing, is what keeps it readable through
+  // that rather than half the time.
+  let pendingLabel = null;
+
+  function drawPlateLabel(corners, alpha, name, detail, nameColor, detailColor) {
+    // -20 rather than -7 so the backing box clears the "sink"/"focus"
+    // callouts, which sit just above the plate's top edge.
+    pendingLabel = { x: corners[0][0], y: corners[0][1] - 20, alpha, name, detail, nameColor, detailColor };
+  }
+
+  function flushLabel() {
+    if (!pendingLabel) return;
+    const { x, y, alpha, name, detail, nameColor, detailColor } = pendingLabel;
+    pendingLabel = null;
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
-    ctx.textBaseline = "top";
-    ctx.fillStyle = COLORS.label;
-    ctx.fillText(`L${String(layer).padStart(2, "0")}/${cfg.layers}`, x, y);
-    ctx.fillStyle = COLORS.labelDim;
-    ctx.fillText(
-      compact
-        ? `attn ${frame.pos + 1}`
-        : `mlp ${cfg.mlpCells}  resid ${cfg.residCells}  attn ${frame.pos + 1}`,
-      x + 74,
-      y
-    );
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    const w = 78 + ctx.measureText(detail).width;
+    ctx.fillStyle = "rgba(6, 8, 10, 0.95)";
+    ctx.fillRect(x - 4, y - 13, w + 8, 18);
+    ctx.fillStyle = nameColor;
+    ctx.fillText(name, x, y);
+    ctx.fillStyle = detailColor;
+    ctx.fillText(detail, x + 78, y);
     ctx.restore();
   }
 
   // The band between one token's stack and the next, captioned with the
   // token that pass emitted. This is the thing that makes the endless
-  // tower legible: without it a fall through 30 layers looks the same as a
-  // fall through 60.
+  // tower legible: without it a fall through 60 plates looks the same as a
+  // fall through 120.
   function drawTokenBand(frame, y, alpha) {
     const w = Math.min(compact ? W * 0.9 : 1120, W * 0.9);
-    const x = W * (compact ? 0.5 : 0.53) - w / 2;
+    const x = plateCx() - w / 2;
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = COLORS.goldDim;
@@ -506,7 +845,12 @@ export function createStackViz(canvas) {
     ctx.stroke();
 
     const raw = (frame.text || "").replace(/\n/g, "\\n");
-    const label = raw ? `token  "${raw}"` : "token  ...";
+    // Named with the layers the run above it covered, so the band says
+    // both which token that pass emitted and how deep into the model this
+    // stretch of the fall got.
+    const { first, last } = runLayers(frame);
+    const span = first === last ? `L${first}` : `L${first}-L${last}`;
+    const label = raw ? `token  "${raw}"   ${span}` : `token  ...   ${span}`;
     ctx.font = "12px ui-monospace, Menlo, Consolas, monospace";
     ctx.textBaseline = "middle";
     const tw = ctx.measureText(label).width + 20;
@@ -522,7 +866,7 @@ export function createStackViz(canvas) {
   // layer from its mean activation energy, with a caret at the camera.
   // Instrumentation, and the only place the full shape of the model is
   // visible at once while the camera is inside it.
-  function drawRail(frame, activeLayer, alpha) {
+  function drawRail(frame, activeLayer, activeIsAttn, alpha) {
     if (!frame) return;
     const x = compact ? 13 : 24;
     const top = Hpx * 0.17;
@@ -542,12 +886,41 @@ export function createStackViz(canvas) {
       const e = clamp(frame.energy[l] * 3.2, 0.06, 1);
       const here = l === activeLayer;
       ctx.globalAlpha = alpha * (here ? 1 : 0.4 + 0.6 * e);
-      ctx.strokeStyle = here ? COLORS.gold : COLORS.frame;
+      // The caret takes the colour of the plate the camera is on, so the
+      // rail says which half of the block is being drawn as well as where.
+      ctx.strokeStyle = here ? (activeIsAttn ? COLORS.attnFrame : COLORS.gold) : COLORS.frame;
       ctx.lineWidth = here ? 2.5 : 1.4;
       ctx.beginPath();
       ctx.moveTo(x - (here ? 8 : 3), y);
       ctx.lineTo(x + 5 + e * (compact ? 10 : 22), y);
       ctx.stroke();
+    }
+
+    // A bracket over the layers this token's run covers. With only part of
+    // the model on screen per token, this is what says which part -- and
+    // watching it walk down the rail and wrap is the clearest view of the
+    // descent there is.
+    const { first, last } = runLayers(frame);
+    const yOf = (l) => top + ((bot - top) * l) / (n - 1);
+    const drawBracket = (a2, b2) => {
+      const y1 = yOf(a2) - 3;
+      const y2 = yOf(b2) + 3;
+      ctx.beginPath();
+      ctx.moveTo(x - 13, y1);
+      ctx.lineTo(x - 16, y1);
+      ctx.lineTo(x - 16, y2);
+      ctx.lineTo(x - 13, y2);
+      ctx.stroke();
+    };
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.strokeStyle = COLORS.goldDim;
+    ctx.lineWidth = 1;
+    // A run that wrapped past the last layer draws as two brackets, which
+    // is what actually happened.
+    if (last >= first) drawBracket(first, last);
+    else {
+      drawBracket(first, n - 1);
+      drawBracket(0, last);
     }
 
     ctx.globalAlpha = alpha;
@@ -568,46 +941,69 @@ export function createStackViz(canvas) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const cy = Hpx * 0.47;
-    // Derived from how tall a plate actually is rather than from the
+    // Derived from how tall the plates actually are rather than from the
     // viewport alone, so the stack stays a stack: a fixed fraction of the
     // height leaves the short desktop plates crowded and the tall phone
     // plates floating in empty space.
-    const spacing = Math.max(((plateWidth() / grid.w) * grid.h) * 1.7, Hpx * 0.33);
+    //
+    // The mean of the two heights, not the larger: the plates alternate
+    // tall-short-tall-short, so pitching every gap for the tall one puts a
+    // screen's worth of empty space either side of every attention plate.
+    //
+    // The multiplier is set by what hangs off a plate rather than by taste.
+    // Between one plate's centre and the next there has to be room for the
+    // residual trace under the MLP, the token band, and then the attention
+    // plate's label and fan -- about 250px at desktop sizes, and at
+    // anything tighter the band ends up written across the plate below it.
+    const mlpH = (plateWidth() / grid.w) * grid.h;
+    const attnH = cfg.heads * (compact ? ATTN_ROW_PX_COMPACT : ATTN_ROW_PX);
+    const spacing = Math.max(((mlpH + attnH) / 2) * 2.05, Hpx * 0.26);
     const centre = Math.round(camG);
 
-    // Farthest first, so nearer layers overlay them.
+    // Mildly perspective rather than linear in z: distance compresses, so
+    // the tower recedes into the top and bottom of the frame instead of
+    // the third plate simply being off screen.
+    const yOf = (z) => cy + spacing * (z / (1 + Math.abs(z) * 0.28));
+
+    // Farthest first, so nearer plates overlay them.
     const order = [];
     for (let d = -DRAW_SPAN; d <= DRAW_SPAN; d++) order.push(centre + d);
     order.sort((p, q) => Math.abs(q - camG) - Math.abs(p - camG));
 
     let activeFrame = null;
     let activeLayer = 0;
+    let activeIsAttn = false;
 
     for (const g of order) {
       if (g < 0) continue;
       const z = g - camG;
-      const s = 1 / (1 + Math.abs(z) * 0.42);
-      const a = clamp(1.12 - Math.abs(z) * 0.5, 0, 1) * fade;
+      const az = Math.abs(z);
+      const s = 1 / (1 + az * 0.34);
+      const a = clamp(1.15 - az * 0.3, 0, 1) * fade;
       if (a <= 0.012) continue;
-      const y = cy + z * spacing;
+      const y = yOf(z);
 
-      const index = Math.floor(g / slot);
-      const layer = g - index * slot;
-      const frame = frameAt(index);
-      if (!frame) continue;
+      const at = plateFor(g);
+      if (!at) continue;
 
-      if (layer >= cfg.layers) {
-        drawTokenBand(frame, y, a);
-        continue;
-      }
-      drawLayerSlab(frame, layer, y, s, a);
-      if (Math.abs(z) < 0.5) {
-        activeFrame = frame;
+      // Two plates per layer, attention first: the order the block runs in.
+      const layer = at.plate >> 1;
+      const isAttn = (at.plate & 1) === 0;
+      if (isAttn) drawAttnSlab(at.frame, layer, y, s, a);
+      else drawLayerSlab(at.frame, layer, y, s, a);
+      // The band closing this run, in the space before the next run's
+      // first plate. Nudged past the midpoint so it reads as belonging to
+      // the run above it rather than floating between two.
+      if (at.last) drawTokenBand(at.frame, y + (yOf(z + 1) - y) * 0.55, a);
+      if (az < 0.5) {
+        activeFrame = at.frame;
         activeLayer = layer;
+        activeIsAttn = isAttn;
       }
     }
 
-    drawRail(activeFrame || frames[frames.length - 1], activeLayer, fade * 0.85);
+    flushLabel();
+    drawRail(activeFrame || frames[frames.length - 1], activeLayer, activeIsAttn, fade * 0.85);
   }
 
   // ------------------------------- loop ---------------------------------

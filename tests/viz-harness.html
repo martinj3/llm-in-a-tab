@@ -14,8 +14,8 @@
 <body>
 <!--
   A bench for js/viz/stack.js that needs no model, no worker and no
-  network: it synthesizes activation frames with the same statistics the
-  real probe produces and pushes them at a chosen tokens-per-second.
+  network: it replays real activation frames (or synthesizes ones with the
+  same statistics) and pushes them at a chosen tokens-per-second.
 
   It exists because the visualization is the one part of this project that
   cannot be checked by asserting on numbers, and running the real 135M to
@@ -24,8 +24,9 @@
   in a background tab -- which is what makes it possible to render a frame
   and read the pixels back out without a compositing window.
 
-  Open with ?tps=6 to set the token rate. window.harness exposes step() and
-  shot() for driving it from a console.
+  Open with ?tps=6 to set the token rate, ?real=0 to force synthetic
+  frames, ?pos=N to start the synthetic context at N positions.
+  window.harness exposes step() and shot() for driving it from a console.
 -->
 <canvas id="viz"></canvas>
 <script type="module">
@@ -50,8 +51,10 @@ const params = new URLSearchParams(location.search);
 // Real frames dumped by tests/dump-frames.mjs, when they are present.
 // Worth the round trip: real SwiGLU activations are far sparser than any
 // obvious synthetic guess (three quarters of all neurons sit in the bottom
-// sixteenth of their layer's range), so a colour ramp tuned against
-// invented data comes out looking like television static.
+// sixteenth of their layer's range), and real attention is dominated by
+// the sink at position 0 in a way that is easy to under-model. A colour
+// ramp tuned against invented data comes out looking like television
+// static.
 let real = null;
 if (params.get("real") !== "0") {
   try {
@@ -64,24 +67,29 @@ if (params.get("real") !== "0") {
 const LAYERS = real ? real.meta.layers : Number(params.get("layers") || 30);
 const MLP = real ? real.meta.mlpCells : Number(params.get("mlp") || 1536);
 const RESID = real ? real.meta.residCells : Number(params.get("resid") || 576);
-const ATTN = real ? real.meta.attnBins : 128;
-const STRIDE = MLP + RESID + ATTN;
+const HEADS = real ? real.meta.heads : Number(params.get("heads") || 9);
+const ATTN_BASE = MLP + RESID;
+const MAX_COLS = real ? real.meta.maxCols : 1024;
 
 const viz = createStackViz(document.getElementById("viz"));
-viz.configure({ layers: LAYERS, mlpCells: MLP, residCells: RESID, attnBins: ATTN, stride: STRIDE });
+viz.configure({ layers: LAYERS, mlpCells: MLP, residCells: RESID, heads: HEADS,
+                maxCols: MAX_COLS, attnBase: ATTN_BASE });
 
 // Deterministic PRNG so a captured frame is reproducible across runs.
 let seed = 12345;
 const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
 
-// Matches what js/model/probe.js emits: bytes centred on 128, heavy-tailed
-// (most neurons near zero, a few far out), normalized per layer so exactly
-// one cell sits on the 127 rail. Attention is spiky and causal-looking,
-// with the sink at position 0 that real transformers always show.
+// Matches what js/model/probe.js emits: mlp/resid bytes centred on 128,
+// heavy-tailed, normalized per layer so exactly one cell sits on the 127
+// rail. Attention is one row per head of sqrt(w / that head's peak), with
+// the position-0 sink every real transformer shows, a local window near
+// the current position, and one head-specific focus.
 function makeFrame(index, pos, text) {
-  const bytes = new Uint8Array(LAYERS * STRIDE);
+  const cols = Math.min(pos + 1, MAX_COLS);
+  const stride = ATTN_BASE + HEADS * cols;
+  const bytes = new Uint8Array(LAYERS * stride);
   for (let l = 0; l < LAYERS; l++) {
-    const base = l * STRIDE;
+    const base = l * stride;
     const sparsity = 2.4 + (l / LAYERS) * 2.2;
     let peak = 0, peakAt = 0;
     for (let c = 0; c < MLP; c++) {
@@ -103,20 +111,23 @@ function makeFrame(index, pos, text) {
     }
     bytes[base + MLP + rpeakAt] = 128 + 127;
 
-    const bins = Math.min(pos + 1, ATTN);
-    let apeak = 0, apeakAt = 0;
-    for (let b = 0; b < bins; b++) {
-      let w = Math.pow(rnd(), 6) * 0.5;
-      if (b === 0) w += 0.9;                       // attention sink
-      if (b === bins - 1) w += 0.7;                // self
-      if (b === ((l * 7) % bins)) w += 0.8;        // a layer-specific focus
-      const v = Math.min(255, Math.round(w * 255));
-      bytes[base + MLP + RESID + b] = v;
-      if (v > apeak) { apeak = v; apeakAt = b; }
+    for (let h = 0; h < HEADS; h++) {
+      const off = base + ATTN_BASE + h * cols;
+      const focus = (l * 7 + h * 31) % cols;
+      const w = new Float32Array(cols);
+      let wmax = 0;
+      for (let c = 0; c < cols; c++) {
+        let v = Math.pow(rnd(), 7) * 0.02;
+        if (c === 0) v += 0.55 + rnd() * 0.35;          // attention sink
+        if (c > cols - 6) v += 0.08;                    // local window
+        if (c === focus) v += 0.25 + rnd() * 0.3;
+        w[c] = v;
+        if (v > wmax) wmax = v;
+      }
+      for (let c = 0; c < cols; c++) bytes[off + c] = (255 * Math.sqrt(w[c] / wmax)) | 0;
     }
-    bytes[base + MLP + RESID + apeakAt] = 255;
   }
-  return { bytes, attnUsed: Math.min(pos + 1, ATTN), pos, text };
+  return { bytes, cols, stride, pos, text };
 }
 
 const WORDS = [" The", " model", " reads", " every", " token", " at", " once", ".",
@@ -125,17 +136,19 @@ const WORDS = [" The", " model", " reads", " every", " token", " at", " once", "
 function nextFrame(index, pos, text) {
   if (!real) return makeFrame(index, pos, text);
   const i = index % real.meta.count;
-  const size = LAYERS * STRIDE;
+  const at = real.meta.offsets[i];
+  const len = LAYERS * real.meta.stride[i];
   return {
-    bytes: real.bin.slice(i * size, (i + 1) * size),
-    attnUsed: real.meta.attnUsed[i],
+    bytes: real.bin.slice(at, at + len),
+    cols: real.meta.cols[i],
+    stride: real.meta.stride[i],
     pos: real.meta.pos[i],
     text: real.meta.texts[i],
   };
 }
 
 let token = 0;
-let pos = 213;
+let pos = Number(params.get("pos") || 213);
 const tps = Number(params.get("tps") || 6);
 const tokenMs = 1000 / tps;
 
@@ -180,7 +193,7 @@ window.harness = {
   step,
   stop: () => viz.stop(),
   shot,
-  state: () => ({ token, pos, clock }),
+  state: () => ({ token, pos, clock, real: !!real }),
 };
 </script>
 </body>

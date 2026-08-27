@@ -246,18 +246,25 @@ async function handleGenerate({ text, temperature, topP, maxNewTokens }) {
     generated++;
 
     const watching = vizEnabled;
-    if (watching) probe.beginToken();
+    // The token is about to be appended at cache.seqLen, so it will attend
+    // over that many cached positions plus itself. The probe sizes the
+    // frame from this, which is why it has to be handed over before the
+    // pass rather than discovered during it.
+    if (watching) probe.beginToken(cache.seqLen + 1);
     logits = decodeStep(tensors, config, cache, tokenId, watching ? probe : null);
     if (watching) {
       // The forward pass that just ran was *of* this token, so the frame
       // and the text belong together -- which is what lets the renderer
       // caption each pass of the tower with the token it processed.
+      // `cols`/`stride` travel per frame because the attention block grows
+      // with the context (js/model/probe.js).
       const frame = probe.endToken();
       postTransfer(
         {
           type: "activations",
           bytes: frame.bytes,
-          attnUsed: frame.attnUsed,
+          cols: frame.cols,
+          stride: frame.stride,
           pos: cache.seqLen - 1,
           text: piece,
         },

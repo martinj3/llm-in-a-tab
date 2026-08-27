@@ -3,7 +3,12 @@
 // guess at the distribution. Writes a flat binary of N frames plus a JSON
 // sidecar, for tests/viz-harness.html to load with ?real=1.
 //
-// Usage: node tests/dump-frames.mjs [135M|360M] [outDir]
+// Usage: node tests/dump-frames.mjs [135M|360M] [outDir] [prompt]
+//
+// The prompt matters more than it looks: the attention block is
+// heads x context, so a short prompt dumps frames whose attention plates
+// are 40 columns of fat blocks and a long one dumps the pixel-dense case.
+// The default is deliberately wordy for that reason.
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -54,7 +59,18 @@ const tensors = await loadTensors(modelId);
 
 const cache = createKVCache(config, MAX_CTX);
 const probe = createProbe(config, MAX_CTX);
-const ids = tokenizer.encode(renderSystemTurn() + renderUserTurn("Explain gravity in one sentence."));
+const prompt = process.argv[4] ||
+  "Here is a passage I would like you to think about carefully before answering. " +
+  "Gravity is one of the four fundamental interactions, alongside electromagnetism " +
+  "and the strong and weak nuclear forces. It is by far the weakest of the four, " +
+  "yet it is the one that shapes the large-scale structure of the universe, because " +
+  "it is always attractive and has unlimited range, so it accumulates over enormous " +
+  "distances where the others cancel out. Newton described it as a force between " +
+  "masses; Einstein described it instead as the curvature of spacetime, with masses " +
+  "following the straightest available paths through a geometry they themselves bend. " +
+  "Both descriptions agree closely in weak fields, and the second is needed near very " +
+  "dense objects and for the universe as a whole. Now, in one sentence: what is gravity?";
+const ids = tokenizer.encode(renderSystemTurn() + renderUserTurn(prompt));
 let logits = prefill(tensors, config, cache, ids);
 
 const decoder = new StreamDecoder(tokenizer);
@@ -63,50 +79,68 @@ const texts = [];
 for (let s = 0; s < STEPS; s++) {
   const id = argmax(logits);
   texts.push(decoder.push(id) || "");
-  probe.beginToken();
+  probe.beginToken(cache.seqLen + 1);
   logits = decodeStep(tensors, config, cache, id, probe);
   const f = probe.endToken();
-  frames.push({ bytes: f.bytes, attnUsed: f.attnUsed, pos: cache.seqLen - 1 });
+  frames.push({ bytes: f.bytes, cols: f.cols, stride: f.stride, pos: cache.seqLen - 1 });
 }
 
-// Histogram of |activation| across every captured MLP cell, which is the
-// number that decides whether the colour ramp reads as a sparse
-// constellation or as television static.
-const { mlpCells, stride, layers } = probe.geometry;
-const hist = new Array(16).fill(0);
-let total = 0;
-for (const f of frames) {
-  for (let l = 0; l < layers; l++) {
-    for (let c = 0; c < mlpCells; c++) {
-      const mag = Math.abs(f.bytes[l * stride + c] - 128) / 127;
-      hist[Math.min(15, (mag * 16) | 0)]++;
-      total++;
-    }
+const { mlpCells, residCells, heads, layers, attnBase } = probe.geometry;
+
+// Distribution of a byte field across every captured frame. These are the
+// numbers that decide whether a colour ramp reads as a sparse
+// constellation or as television static, and guessing them wrong is how
+// the first pass at this looked like noise.
+function histogram(label, pick) {
+  const hist = new Array(16).fill(0);
+  let total = 0;
+  for (const f of frames) {
+    for (let l = 0; l < layers; l++) pick(f, l, (mag) => { hist[Math.min(15, (mag * 16) | 0)]++; total++; });
   }
+  console.log(`\n${label} (fraction per 1/16 bucket):`);
+  hist.forEach((n, i) =>
+    console.log(
+      `  ${(i / 16).toFixed(3)}-${((i + 1) / 16).toFixed(3)}  ${((n / total) * 100).toFixed(2)}%  ` +
+        "#".repeat(Math.round((n / total) * 200))
+    )
+  );
+  return total;
 }
-console.log("\n|activation| distribution (fraction of cells per 1/16 bucket):");
-hist.forEach((n, i) =>
-  console.log(
-    `  ${(i / 16).toFixed(3)}-${((i + 1) / 16).toFixed(3)}  ${((n / total) * 100).toFixed(2)}%  ` +
-      "#".repeat(Math.round((n / total) * 200))
-  )
-);
+
+const total = histogram("|mlp activation|", (f, l, add) => {
+  for (let c = 0; c < mlpCells; c++) add(Math.abs(f.bytes[l * f.stride + c] - 128) / 127);
+});
 let neg = 0;
 for (const f of frames) {
   for (let l = 0; l < layers; l++) {
-    for (let c = 0; c < mlpCells; c++) if (f.bytes[l * stride + c] < 128) neg++;
+    for (let c = 0; c < mlpCells; c++) if (f.bytes[l * f.stride + c] < 128) neg++;
   }
 }
 console.log(`negative fraction: ${((neg / total) * 100).toFixed(1)}%`);
 
+histogram("attention weight (sqrt of own-peak fraction)", (f, l, add) => {
+  const base = l * f.stride + attnBase;
+  for (let i = 0; i < heads * f.cols; i++) add(f.bytes[base + i] / 255);
+});
+
 await mkdir(outDir, { recursive: true });
+// Frames vary in length now (the attention block grows with the context),
+// so the sidecar carries per-frame byte offsets rather than one stride.
 const buf = Buffer.concat(frames.map((f) => Buffer.from(f.bytes)));
 await writeFile(path.join(outDir, "frames.bin"), buf);
+let off = 0;
+const offsets = frames.map((f) => {
+  const at = off;
+  off += f.bytes.length;
+  return at;
+});
 await writeFile(
   path.join(outDir, "frames.json"),
   JSON.stringify(
-    { modelId, ...probe.geometry, count: frames.length,
-      attnUsed: frames.map((f) => f.attnUsed), pos: frames.map((f) => f.pos), texts },
+    { modelId, layers, mlpCells, residCells, heads, attnBase,
+      maxCols: probe.geometry.maxCols, count: frames.length,
+      cols: frames.map((f) => f.cols), stride: frames.map((f) => f.stride),
+      offsets, pos: frames.map((f) => f.pos), texts },
     null, 1
   )
 );

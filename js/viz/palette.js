@@ -80,6 +80,45 @@ for (let v = 0; v < 256; v++) {
   NEURON_LUT[o + 3] = a | 0;
 }
 
+// Attention gets its own table and its own hue. The bytes are unsigned
+// (js/model/probe.js: a head's weights over the context, already
+// square-rooted and scaled to that head's own peak), so all 256 entries
+// are one ramp rather than two halves meeting at 128.
+//
+// Amber rather than a second green: the tower now alternates an attention
+// plate and an MLP plate per layer, and they have to be tellable apart at
+// a glance while the camera is falling. Amber over green is also the
+// period-correct pair -- the two phosphors these terminals actually came
+// in. It does collide with the negative half of NEURON_LUT, but that is a
+// sparse accent inside a green field, never a whole plate.
+const ATTENTION = [
+  [0.0, 24, 13, 2],
+  [0.28, 122, 63, 6],
+  [0.55, 214, 138, 26],
+  [0.78, 255, 202, 96],
+  [1.0, 255, 247, 216],
+];
+
+export const ATTN_LUT = new Uint8Array(256 * 4);
+
+for (let v = 0; v < 256; v++) {
+  const m = v / 255;
+  const [r, g, b] = ramp(ATTENTION, Math.pow(m, 0.8));
+  // Very close to linear, off a floor of 8. Measured (tests/dump-frames.mjs)
+  // the byte distribution is 69% below 1/16, then a long even tail and 2.4%
+  // pinned at the top -- the sink and the local window. Unlike the SwiGLU
+  // ramp, which has to fight a distribution three quarters of which sits in
+  // the bottom sixteenth, this one wants that tail *visible*: the middle of
+  // the context being dark is the picture, and it only reads as "attended
+  // weakly" rather than "not there" if the floor keeps it faintly lit.
+  const a = 14 + 241 * Math.pow(m, 0.9);
+  const o = v * 4;
+  ATTN_LUT[o] = r | 0;
+  ATTN_LUT[o + 1] = g | 0;
+  ATTN_LUT[o + 2] = b | 0;
+  ATTN_LUT[o + 3] = a | 0;
+}
+
 export const COLORS = {
   frame: "rgba(75, 240, 122, 0.5)",
   frameDim: "rgba(75, 240, 122, 0.16)",
@@ -90,4 +129,8 @@ export const COLORS = {
   goldDim: "rgba(255, 200, 92, 0.3)",
   label: "rgba(75, 240, 122, 0.52)",
   labelDim: "rgba(75, 240, 122, 0.24)",
+  attnFrame: "rgba(255, 192, 84, 0.5)",
+  attnFrameDim: "rgba(255, 192, 84, 0.16)",
+  attnLabel: "rgba(255, 192, 84, 0.55)",
+  attnLabelDim: "rgba(255, 192, 84, 0.26)",
 };

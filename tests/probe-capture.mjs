@@ -15,8 +15,9 @@
 //      times, and it looks fine. So the frame is checked against the
 //      activations recomputed independently, and against structural facts
 //      no bug would satisfy by accident: layers differ from each other,
-//      attention is causal and normalized, and the sign of every captured
-//      neuron matches the sign of the float it came from.
+//      every head's attention row is a distinct vector that decodes back
+//      to a probability distribution, and the frame reproduces exactly
+//      when the same decode step is re-run on a freshly built cache.
 //
 // Usage: node tests/probe-capture.mjs [135M|360M]
 // Requires network access to huggingface.co.
@@ -85,7 +86,7 @@ function generate(tensors, config, promptIds, probe) {
   for (let s = 0; s < STEPS; s++) {
     const id = argmax(logits);
     tokens.push(id);
-    if (probe) probe.beginToken();
+    if (probe) probe.beginToken(cache.seqLen + 1);
     logits = decodeStep(tensors, config, cache, id, probe);
     if (probe) frames.push(probe.endToken());
   }
@@ -104,10 +105,14 @@ async function runOne(modelId) {
   );
 
   const probe = createProbe(config, MAX_CTX);
-  const { layers, mlpCells, residCells, attnBins, stride } = probe.geometry;
+  const { layers, mlpCells, residCells, heads, maxCols, attnBase } = probe.geometry;
+  const pos = promptIds.length + STEPS - 1;
+  const expectCols = Math.min(pos + 1, maxCols);
+  const expectStride = attnBase + heads * expectCols;
   console.log(
-    `geometry: layers=${layers} mlp=${mlpCells} resid=${residCells} attn=${attnBins} ` +
-      `stride=${stride} (${((layers * stride) / 1024).toFixed(1)} KB/token)`
+    `geometry: layers=${layers} mlp=${mlpCells} resid=${residCells} heads=${heads} ` +
+      `maxCols=${maxCols}; at pos=${pos} stride=${expectStride} ` +
+      `(${((layers * expectStride) / 1024).toFixed(1)} KB/token)`
   );
 
   // ---- 1. the probe must not perturb the forward pass -------------------
@@ -142,18 +147,27 @@ async function runOne(modelId) {
 
   // ---- 2. the captured bytes must be the real activations ---------------
   const frame = probed.frames[probed.frames.length - 1];
+  const stride = frame.stride;
+  if (frame.cols !== expectCols) {
+    ok = fail(`frame cols=${frame.cols}, expected ${expectCols} for pos=${pos}`);
+  }
+  if (stride !== expectStride) {
+    ok = fail(`frame stride=${stride}, expected ${expectStride}`);
+  }
   if (frame.bytes.length !== layers * stride) {
     ok = fail(`frame is ${frame.bytes.length} bytes, expected ${layers * stride}`);
   }
 
+  const fnv = (from, n) => {
+    let h = 2166136261;
+    for (let i = 0; i < n; i++) h = Math.imul(h ^ frame.bytes[from + i], 16777619) >>> 0;
+    return h;
+  };
+
   // Every layer distinct: catches a frame that captured one layer L times,
   // or that reused a stale buffer after transfer.
   const fingerprints = new Set();
-  for (let l = 0; l < layers; l++) {
-    let h = 2166136261;
-    for (let c = 0; c < mlpCells; c++) h = (Math.imul(h ^ frame.bytes[l * stride + c], 16777619) >>> 0);
-    fingerprints.add(h);
-  }
+  for (let l = 0; l < layers; l++) fingerprints.add(fnv(l * stride, mlpCells));
   if (fingerprints.size !== layers) {
     ok = fail(`only ${fingerprints.size} distinct layers in a ${layers}-layer frame`);
   }
@@ -190,30 +204,90 @@ async function runOne(modelId) {
     }
   }
 
-  // Attention: causal and normalized. attnUsed bins cover positions
-  // 0..pos, the peak bin is at 255, and no bin beyond attnUsed is set.
-  const attnOff = mlpCells + residCells;
-  const pos = promptIds.length + STEPS - 1;
-  const expectBins = Math.min(pos + 1, attnBins);
-  if (frame.attnUsed !== expectBins) {
-    ok = fail(`attnUsed=${frame.attnUsed}, expected ${expectBins} for pos=${pos}`);
-  }
-  for (let l = 0; l < layers; l++) {
-    let peak = 0;
-    for (let b = 0; b < frame.attnUsed; b++) {
-      const v = frame.bytes[l * stride + attnOff + b];
-      if (v > peak) peak = v;
-    }
-    if (peak !== 255) {
-      ok = fail(`layer ${l} attention peak is ${peak}, expected 255`);
-      break;
-    }
-    for (let b = frame.attnUsed; b < attnBins; b++) {
-      if (frame.bytes[l * stride + attnOff + b] !== 0) {
-        ok = fail(`layer ${l} attention bin ${b} set beyond attnUsed=${frame.attnUsed}`);
+  // ---- 3. the attention block must be the attention matrix --------------
+  //
+  // Every head of every layer gets its own row of `cols` bytes. Three
+  // properties, each of which a plausible bug fails:
+  //
+  //  - Own-peak normalization puts exactly one 255 in each row. A row that
+  //    peaks lower is a row that was never written, or was written with a
+  //    scale borrowed from a different head.
+  //  - Rows must differ from each other. Writing every head to the same
+  //    offset, or capturing after `scores` has been overwritten, produces
+  //    `heads` identical rows and looks perfectly plausible on screen.
+  //    Not *every* pair, though: some trained heads collapse onto the
+  //    position-0 sink so completely that the rest of the row quantizes to
+  //    zeros, and two such heads are then byte-identical for real reasons.
+  //    360M layer 18 does exactly this. So the bar is that no layer is
+  //    entirely uniform and that duplicates stay rare -- and every
+  //    duplicate found gets printed with how sink-dominated it was, so a
+  //    real bug cannot hide behind the tolerance.
+  //  - The bytes must decode back to a probability distribution. The probe
+  //    stores sqrt(w / peak), so squaring recovers w/peak and the row sums
+  //    to 1/peak. Softmax over `cols` positions bounds peak into
+  //    [1/cols, 1], so that sum must land in [1, cols]. Nothing but a real
+  //    post-softmax vector satisfies this at every layer and head.
+  let rowSumLo = Infinity;
+  let rowSumHi = 0;
+  const allRows = new Map(); // fingerprint -> first "layer/head" that produced it
+  let duplicates = 0;
+  for (let l = 0; l < layers && ok; l++) {
+    const rows = new Set();
+    for (let h = 0; h < heads; h++) {
+      const from = l * stride + attnBase + h * frame.cols;
+      let peak = 0;
+      let sum = 0;
+      let dark = 0; // bytes below 4: positions the quantizer flattened away
+      for (let c = 0; c < frame.cols; c++) {
+        const v = frame.bytes[from + c];
+        if (v > peak) peak = v;
+        if (v < 4) dark++;
+        const p = v / 255;
+        sum += p * p;
+      }
+      if (peak !== 255) {
+        ok = fail(`layer ${l} head ${h} attention peak is ${peak}, expected 255`);
         break;
       }
+      // Quantization rounds, so the recovered sum can sit a hair either
+      // side of 1 on a row that is essentially all sink; allow a little
+      // slack at the bottom.
+      if (!(sum >= 0.98 && sum <= frame.cols)) {
+        ok = fail(
+          `layer ${l} head ${h}: recovered mass ${sum.toFixed(3)} outside [1, ${frame.cols}] ` +
+            `-- these bytes are not a softmax output`
+        );
+        break;
+      }
+      if (sum < rowSumLo) rowSumLo = sum;
+      if (sum > rowSumHi) rowSumHi = sum;
+      const fp = fnv(from, frame.cols);
+      rows.add(fp);
+      const seen = allRows.get(fp);
+      if (seen === undefined) allRows.set(fp, `${l}/${h}`);
+      else {
+        duplicates++;
+        console.log(
+          `  note: layer ${l} head ${h} is byte-identical to ${seen} ` +
+            `(${dark}/${frame.cols} positions quantize to zero -- sink-dominated)`
+        );
+      }
     }
+    if (ok && rows.size < 2) {
+      ok = fail(`layer ${l}: all ${heads} heads produced the same row`);
+    }
+  }
+  const total = layers * heads;
+  if (ok && allRows.size < total * 0.85) {
+    ok = fail(`only ${allRows.size} distinct rows out of ${total} -- heads are collapsing`);
+  }
+  if (ok) {
+    console.log(
+      `attention: ${layers}x${heads}x${frame.cols} = ` +
+        `${(layers * heads * frame.cols).toLocaleString()} weights/token, ` +
+        `${allRows.size}/${total} rows distinct (${duplicates} sink-degenerate), ` +
+        `1/peak in [${rowSumLo.toFixed(2)}, ${rowSumHi.toFixed(2)}] of a possible ${frame.cols}`
+    );
   }
 
   // Sign agreement against an independently recomputed residual. Re-run the
@@ -225,7 +299,7 @@ async function runOne(modelId) {
   let lg = prefill(tensors, config, check, promptIds);
   for (let s = 0; s < STEPS - 1; s++) lg = decodeStep(tensors, config, check, argmax(lg));
   const probe2 = createProbe(config, MAX_CTX);
-  probe2.beginToken();
+  probe2.beginToken(check.seqLen + 1);
   decodeStep(tensors, config, check, argmax(lg), probe2);
   const again = probe2.endToken();
   let same = 0;
@@ -237,7 +311,8 @@ async function runOne(modelId) {
   if (ok) {
     console.log(
       `PASS: probe is read-only, all ${layers} layers distinct and normalized, ` +
-        `attention causal over ${frame.attnUsed} bins, frame reproducible.`
+        `attention rows decode back to distributions over ${frame.cols} positions, ` +
+        `frame reproducible.`
     );
   }
 }
