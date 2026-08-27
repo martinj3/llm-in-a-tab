@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llm-in-a-tab</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main>
+    <h1>llm-in-a-tab</h1>
+    <p class="subtitle">A transformer running in pure JavaScript, entirely in this browser tab.</p>
+
+    <div class="model-buttons">
+      <button id="download-135m" data-model="135M">Download 135M</button>
+      <button id="download-360m" data-model="360M">Download 360M</button>
+    </div>
+
+    <div class="progress-wrap" id="progress-wrap" hidden>
+      <progress id="progress-bar" max="100" value="0"></progress>
+      <span id="progress-label"></span>
+    </div>
+
+    <div class="status">
+      <div id="status-line">Idle.</div>
+      <pre id="log"></pre>
+    </div>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
