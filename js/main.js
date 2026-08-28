@@ -24,6 +24,8 @@ const topPSlider = document.getElementById("top-p");
 const temperatureOut = document.getElementById("temperature-out");
 const topPOut = document.getElementById("top-p-out");
 const vizToggle = document.getElementById("viz-toggle");
+const sampling = document.getElementById("sampling");
+const settingsToggle = document.getElementById("settings-toggle");
 
 const hud = {
   model: document.getElementById("hud-model"),
@@ -249,6 +251,15 @@ function syncSamplingControls() {
   temperatureOut.textContent = Number(temperatureSlider.value).toFixed(2);
   topPOut.textContent = Number(topPSlider.value).toFixed(2);
 }
+
+// Collapsed by default -- the sliders are rarely touched, and hiding them
+// gives the visualization behind the composer that much more screen.
+settingsToggle.addEventListener("click", () => {
+  const open = sampling.hidden;
+  sampling.hidden = !open;
+  settingsToggle.setAttribute("aria-expanded", String(open));
+  settingsToggle.classList.toggle("active", open);
+});
 
 greedyBox.addEventListener("change", syncSamplingControls);
 temperatureSlider.addEventListener("input", syncSamplingControls);
