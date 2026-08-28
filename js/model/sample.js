@@ -15,6 +15,44 @@ export function argmax(logits) {
   return best;
 }
 
+// The k highest-probability tokens, descending, as [{ id, prob }].
+//
+// Display only -- nothing downstream of generation reads this, so it is
+// safe for it to disagree with sampleToken's own draw. It does not sort
+// the vocabulary: a k-element insertion scan is a few hundred thousand
+// comparisons against the full sort's ~49k*log(49k), which matters here
+// in a way it does not in sampleToken because this runs on every token
+// including the greedy path, where sampleToken is just an argmax.
+//
+// temperature <= 0 (greedy) reports the model's own distribution at T=1
+// rather than the degenerate one-hot the sampler is actually using --
+// which is the interesting thing to look at, and the reason the chosen
+// token is marked separately instead of inferred from being first.
+export function topCandidates(logits, k = 15, temperature = 0) {
+  const n = logits.length;
+  const t = temperature > 0 ? temperature : 1;
+
+  let max = -Infinity;
+  for (let i = 0; i < n; i++) if (logits[i] > max) max = logits[i];
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += Math.exp((logits[i] - max) / t);
+
+  // Insertion into a k-slot array kept in descending logit order. The
+  // first test rejects the overwhelming majority of the vocabulary in one
+  // comparison once the array is full.
+  const top = [];
+  for (let i = 0; i < n; i++) {
+    const v = logits[i];
+    if (top.length === k && v <= top[k - 1].v) continue;
+    let at = top.length;
+    while (at > 0 && top[at - 1].v < v) at--;
+    top.splice(at, 0, { id: i, v });
+    if (top.length > k) top.pop();
+  }
+
+  return top.map(({ id, v }) => ({ id, prob: Math.exp((v - max) / t) / sum }));
+}
+
 // Nucleus sampling: softmax(logits / temperature), keep the smallest set
 // of tokens whose probabilities sum to >= topP, renormalize, draw one.
 //

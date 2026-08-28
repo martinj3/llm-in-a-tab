@@ -19,7 +19,7 @@ import { loadTokenizer, StreamDecoder } from "./model/tokenizer.js";
 import { renderSystemTurn, renderUserTurn, renderTurnClose } from "./model/template.js";
 import { createKVCache } from "./model/kvcache.js";
 import { prefill, decodeStep } from "./model/transformer.js";
-import { sampleToken } from "./model/sample.js";
+import { sampleToken, topCandidates } from "./model/sample.js";
 import { createProbe } from "./model/probe.js";
 
 const DTYPE = "i8";
@@ -32,6 +32,10 @@ const MAX_CTX = 1024;
 // prompt that would leave no room to answer is rejected up front rather
 // than accepted and then truncated mid-reply.
 const REPLY_RESERVE = 256;
+
+// How many alternatives to report per token. The widest a client asks for
+// (desktop shows 15, phones 7), so one number serves both.
+const CANDIDATE_COUNT = 15;
 
 let model = null; // { modelId, config, tensors, tokenizer, cache, pendingPrefix, probe }
 let stopRequested = false;
@@ -230,6 +234,21 @@ async function handleGenerate({ text, temperature, topP, maxNewTokens }) {
 
   while (generated < budget) {
     const tokenId = sampleToken(logits, { temperature, topP });
+
+    // The alternatives this token was picked from. Sent before the stop
+    // check so the distribution that ended the reply is visible too, and
+    // always the full desktop count -- which of the 15 a client shows is a
+    // question about its screen, not about the model, so it is decided
+    // there rather than negotiated over postMessage.
+    post({
+      type: "candidates",
+      chosen: tokenId,
+      items: topCandidates(logits, CANDIDATE_COUNT, temperature).map((c) => ({
+        id: c.id,
+        prob: c.prob,
+        text: tokenizer.decode([c.id]),
+      })),
+    });
 
     if (stopIds.has(tokenId)) {
       // Feed the stop token in anyway. It is part of the template, so it

@@ -358,6 +358,73 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   animation: blink 1.06s step-end infinite;
 }
 
+/* -------------------------- CANDIDATE COLUMN --------------------------- */
+
+/* The top-N alternatives for the token just emitted, pinned to the right
+   edge. Absolutely positioned rather than a flex sibling of .transcript
+   so that appearing and disappearing between turns does not reflow the
+   reply mid-generation -- it is a readout laid over the chat, the same
+   relationship the HUD has to it.
+
+   pointer-events:none for the same reason #viz has it: a tall transparent
+   strip down the side of the screen is exactly the shape of the fix.md
+   click-swallowing bug. Vertically centred so it grows in both directions
+   from a fixed point instead of jittering as rows change width. */
+.candidates {
+  position: absolute;
+  right: clamp(0.5rem, 2vw, 1.25rem);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--phosphor-dim);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 420ms ease;
+}
+
+/* Only while the model is working -- between turns there is no "previous
+   token" for it to be about. */
+#chat[data-generating="true"] .candidates { opacity: 1; }
+
+.candidate { display: flex; gap: 0.4rem; align-items: baseline; }
+
+.candidate-mark {
+  width: 0.7em;
+  color: var(--phosphor);
+  white-space: pre;
+}
+
+/* Each row hugs its own content (align-items:flex-end above) so the
+   arrow sits against the token it marks rather than being pushed to the
+   far side of a column sized by the widest token in the set. The
+   probabilities still line up: they are the last item in every row and
+   the rows share a right edge. max-width because the vocabulary contains
+   some very long tokens and one of them should not widen the strip
+   across half the reply. */
+.candidate-token {
+  max-width: 9em;
+  text-align: right;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.candidate-prob { min-width: 3.2em; text-align: right; opacity: 0.7; }
+
+.candidate.chosen { color: var(--phosphor); }
+.candidate.chosen .candidate-prob { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .candidates { transition: none; }
+}
+
 .composer {
   padding: 0.6rem clamp(0.75rem, 4vw, 2rem) 0.9rem;
   border-top: 1px solid rgba(75, 240, 122, 0.14);
@@ -442,6 +509,13 @@ textarea::placeholder { color: var(--phosphor-dim); }
   background: transparent;
 }
 #chat[data-generating="true"] .composer { border-top-color: rgba(75, 240, 122, 0.05); }
+
+/* Make room for the candidate column. The streaming bubble is the one
+   thing on this screen that stays fully legible while the model works,
+   and at phone widths its 82% would otherwise run underneath the strip.
+   Not transitioned: this reflows the reply text, and a 420ms animated
+   rewrap on every turn boundary is worse than one clean jump. */
+#chat[data-generating="true"] .transcript { padding-right: 7rem; }
 
 /* The two survivors need a backdrop of their own: over a field of firing
    neurons, text on a transparent background is unreadable no matter how

@@ -26,6 +26,7 @@ const topPOut = document.getElementById("top-p-out");
 const vizToggle = document.getElementById("viz-toggle");
 const sampling = document.getElementById("sampling");
 const settingsToggle = document.getElementById("settings-toggle");
+const candidatesEl = document.getElementById("candidates");
 
 const hud = {
   model: document.getElementById("hud-model"),
@@ -85,6 +86,48 @@ function syncViz() {
 
 vizToggle.addEventListener("change", syncViz);
 syncViz();
+
+// --------------------------- candidate column ---------------------------
+// The worker sends 15 alternatives per token; a phone has no room for a
+// column that tall next to the reply, so the count is a media query
+// rather than a message to the worker. Live, not stored -- so it is read
+// per frame and a rotated phone picks up the new count on the next token.
+const wideEnough = window.matchMedia("(min-width: 46rem)");
+
+// Whitespace-only tokens are extremely common and would otherwise render
+// as blank rows. Making the space and the newline visible is the
+// difference between "the model was choosing between seven things" and
+// "the model was choosing between two things and five bugs".
+function tokenGlyphs(text) {
+  return text.replace(/\n/g, "⏎").replace(/\t/g, "→").replace(/ /g, "·");
+}
+
+function renderCandidates({ chosen, items }) {
+  const count = wideEnough.matches ? 15 : 7;
+  const rows = document.createDocumentFragment();
+
+  for (const item of items.slice(0, count)) {
+    const row = document.createElement("div");
+    row.className = item.id === chosen ? "candidate chosen" : "candidate";
+
+    const mark = document.createElement("span");
+    mark.className = "candidate-mark";
+    mark.textContent = item.id === chosen ? ">" : " ";
+
+    const text = document.createElement("span");
+    text.className = "candidate-token";
+    text.textContent = tokenGlyphs(item.text);
+
+    const prob = document.createElement("span");
+    prob.className = "candidate-prob";
+    prob.textContent = `${(item.prob * 100).toFixed(1)}%`;
+
+    row.append(mark, text, prob);
+    rows.append(row);
+  }
+
+  candidatesEl.replaceChildren(rows);
+}
 
 function setMem(residentMB) {
   hud.mem.textContent = residentMB ? `mem ${residentMB.toFixed(0)}MB` : "mem --";
@@ -347,6 +390,9 @@ worker.onmessage = (event) => {
     }
 
     case "reply-start":
+      // Clear rather than leave the last reply's final distribution to
+      // flash for the ~500ms until the first token of this one arrives.
+      candidatesEl.replaceChildren();
       streamingBubble = addBubble("assistant");
       streamingBubble.classList.add("streaming");
       scrollTranscript();
@@ -355,6 +401,10 @@ worker.onmessage = (event) => {
 
     case "activations":
       viz.push(message);
+      break;
+
+    case "candidates":
+      renderCandidates(message);
       break;
 
     case "prefill-done":

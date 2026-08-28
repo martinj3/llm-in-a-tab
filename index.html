@@ -77,6 +77,12 @@
 
     <div class="transcript" id="transcript" role="log" aria-live="polite"></div>
 
+    <!-- The distribution the last token was drawn from. Instrumentation
+         like the HUD, redrawn several times a second, so aria-hidden --
+         a live region here would flood a screen reader with the whole
+         column on top of the reply text it is already announcing. -->
+    <div class="candidates" id="candidates" aria-hidden="true"></div>
+
     <form class="composer" id="composer">
       <div class="sampling" id="sampling" hidden>
         <label><input type="checkbox" id="greedy" checked> greedy</label>
