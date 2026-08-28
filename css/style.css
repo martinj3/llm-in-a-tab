@@ -416,10 +416,34 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   text-overflow: ellipsis;
 }
 
+/* The text bar chart (probBar in js/main.js). white-space:pre keeps the
+   trailing pad spaces that hold the percentages in a straight column, and
+   the width is set in ch so the strip is exactly as wide as the cell
+   count the renderer drew -- 2 on phones, 4 on desktop -- rather than
+   whatever the block glyphs happen to advance to. Dimmed a little
+   further than the token beside it: it is a texture to read at a glance,
+   and at full phosphor a stack of solid blocks pulls the eye off the
+   words. */
+.candidate-bar {
+  width: 4ch;
+  white-space: pre;
+  letter-spacing: 0;
+  opacity: 0.55;
+}
+
+/* Must stay the complement of renderCandidates' (min-width: 46rem) in
+   js/main.js -- that query picks how many cells get drawn, this one
+   reserves the room for them, and if they disagree the percentages stop
+   lining up. */
+@media (max-width: 45.99rem) {
+  .candidate-bar { width: 2ch; }
+}
+
 .candidate-prob { min-width: 3.2em; text-align: right; opacity: 0.7; }
 
 .candidate.chosen { color: var(--phosphor); }
 .candidate.chosen .candidate-prob { opacity: 1; }
+.candidate.chosen .candidate-bar { opacity: 0.85; }
 
 @media (prefers-reduced-motion: reduce) {
   .candidates { transition: none; }

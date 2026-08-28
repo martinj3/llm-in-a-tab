@@ -102,8 +102,46 @@ function tokenGlyphs(text) {
   return text.replace(/\n/g, "⏎").replace(/\t/g, "→").replace(/ /g, "·");
 }
 
+// A bar chart drawn in text. The left-eighth block characters let one
+// monospace cell render eight widths, so a 2-cell bar has 16 steps and a
+// 4-cell bar has 32 -- enough resolution to read a shape, in a strip
+// narrow enough to sit beside the token without becoming the widest thing
+// in the column. Drawing it as characters rather than as a styled <div>
+// keeps it on the same monospace grid as everything else, and keeps the
+// column selectable and copyable as plain text.
+const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+// Scaled against the most likely candidate, not against 1.0. The
+// alternative -- full bar means p=1 -- spends almost the whole width on a
+// range the model is rarely in, and collapses every row of a confident
+// step into the same empty sliver, which is exactly the case the column
+// exists to distinguish from a flat one. Here the top row is always full
+// and the others are read against it: one long bar over slivers is a
+// confident step, a stack of similar bars is a coin-flip.
+//
+// sqrt because the tail is where the shape lives. Linear ratios put
+// everything below a few percent of the leader into the same first
+// eighth; the square root spreads that range out without reordering
+// anything. It is a perceptual scale, not a quantity to measure off --
+// the exact number is printed immediately to its right.
+function probBar(ratio, cells) {
+  const eighths = Math.max(1, Math.round(Math.sqrt(ratio) * cells * 8));
+  const full = Math.floor(eighths / 8);
+  const bar = "█".repeat(Math.min(full, cells)) +
+    (full < cells ? EIGHTHS[eighths % 8] : "");
+  // Padded so the percentages stay in a column of their own rather than
+  // shuffling left and right with the bar under them.
+  return bar.padEnd(cells, " ");
+}
+
 function renderCandidates({ chosen, items }) {
-  const count = wideEnough.matches ? 15 : 7;
+  const wide = wideEnough.matches;
+  const count = wide ? 15 : 7;
+  const cells = wide ? 4 : 2;
+  // Every bar is relative to the leader, and the worker sends the list
+  // already sorted, so that is items[0] -- guarded anyway because a zero
+  // here would put NaN in every row.
+  const top = items[0]?.prob || 1;
   const rows = document.createDocumentFragment();
 
   for (const item of items.slice(0, count)) {
@@ -118,11 +156,15 @@ function renderCandidates({ chosen, items }) {
     text.className = "candidate-token";
     text.textContent = tokenGlyphs(item.text);
 
+    const bar = document.createElement("span");
+    bar.className = "candidate-bar";
+    bar.textContent = probBar(item.prob / top, cells);
+
     const prob = document.createElement("span");
     prob.className = "candidate-prob";
     prob.textContent = `${(item.prob * 100).toFixed(1)}%`;
 
-    row.append(mark, text, prob);
+    row.append(mark, text, bar, prob);
     rows.append(row);
   }
 
