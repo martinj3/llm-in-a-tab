@@ -437,6 +437,11 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
    lining up. */
 @media (max-width: 45.99rem) {
   .candidate-bar { width: 2ch; }
+  /* The bar is the whole story at this width -- the percentage is what
+     made room for it in the padding-right the transcript reserves while
+     generating (js/main.js's `count`/`cells` still fetch and compute it,
+     just unused here, since it costs nothing to send). */
+  .candidate-prob { display: none; }
 }
 
 .candidate-prob { min-width: 3.2em; text-align: right; opacity: 0.7; }
