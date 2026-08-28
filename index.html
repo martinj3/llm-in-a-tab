@@ -108,6 +108,19 @@
     </form>
   </section>
 
+  <!-- Shown once, after the first reply of a session finishes, to explain
+       an affordance (hover/tap a word) that has no other visual hint. -->
+  <div class="modal-backdrop" id="hint-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="hint-modal-title">
+      <h2 id="hint-modal-title">Inspecting token odds</h2>
+      <p>Hover a word in a reply to see the distribution it was drawn from --
+        every alternative the model weighed, and how close it came to
+        choosing something else. On a touchscreen, tap the word instead;
+        the panel stays up for 10 seconds.</p>
+      <button type="button" id="hint-modal-ok">OK</button>
+    </div>
+  </div>
+
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

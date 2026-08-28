@@ -27,6 +27,8 @@ const vizToggle = document.getElementById("viz-toggle");
 const sampling = document.getElementById("sampling");
 const settingsToggle = document.getElementById("settings-toggle");
 const candidatesEl = document.getElementById("candidates");
+const hintModal = document.getElementById("hint-modal");
+const hintModalOk = document.getElementById("hint-modal-ok");
 
 const hud = {
   model: document.getElementById("hud-model"),
@@ -293,6 +295,23 @@ transcript.addEventListener("click", (event) => {
 // token out from under it invalidates it.
 transcript.addEventListener("scroll", hideInspector, { passive: true });
 window.addEventListener("resize", hideInspector);
+
+// -------------------------------- hint modal -----------------------------
+// The hover/tap-to-inspect affordance above has no other visual cue, so it
+// gets pointed out once, right after the first reply makes it available.
+// sessionStorage rather than a module-level flag: a reload mid-session
+// should not show it again, but a new tab starts the hint fresh.
+const HINT_SHOWN_KEY = "llm-in-a-tab:inspector-hint-shown";
+
+function maybeShowInspectorHint() {
+  if (sessionStorage.getItem(HINT_SHOWN_KEY)) return;
+  sessionStorage.setItem(HINT_SHOWN_KEY, "1");
+  hintModal.hidden = false;
+}
+
+hintModalOk.addEventListener("click", () => {
+  hintModal.hidden = true;
+});
 
 function setMem(residentMB) {
   hud.mem.textContent = residentMB ? `mem ${residentMB.toFixed(0)}MB` : "mem --";
@@ -614,6 +633,7 @@ worker.onmessage = (event) => {
         if (message.reason === "stopped") streamingBubble.append(" [stopped]");
         if (message.reason === "budget") streamingBubble.append(" [token limit]");
         streamingBubble = null;
+        maybeShowInspectorHint();
       }
       hud.speed.textContent = `${message.tokensPerSecond.toFixed(2)} tok/s`;
       setMem(message.residentMB);

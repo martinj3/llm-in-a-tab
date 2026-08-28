@@ -114,6 +114,12 @@ const DRAW_SPAN = 3;
 const ATTN_ROW_PX = 15; // height of one head's row, desktop
 const ATTN_ROW_PX_COMPACT = 10;
 const FAN_FILAMENTS = 128;
+// Opacity the tower settles at once a reply finishes, instead of fading
+// all the way to nothing. The reply is the thing to read at that point,
+// but the last pass the model made is worth leaving as ambient texture
+// behind it rather than snapping back to plain black -- and it is the
+// same frame the token inspector's numbers came from.
+const HOLD_FADE = 0.16;
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
@@ -225,6 +231,12 @@ export function createStackViz(canvas) {
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(Hpx * dpr);
     if (cfg) layoutGrid();
+    // Resizing the backing canvas clears its bitmap. Normally the running
+    // rAF loop repaints the next frame regardless, but a held frame after
+    // stop() has already parked that loop (see tick()), so without this a
+    // resize -- rotating a phone, resizing a window -- would blank out the
+    // dimmed tower until the next reply starts it back up.
+    if (!raf && fade > 0.004) render();
   }
 
   function layoutGrid() {
@@ -381,8 +393,12 @@ export function createStackViz(canvas) {
   // ----------------------------- animation ------------------------------
 
   function step(dt) {
-    if (running) fade = Math.min(1, fade + dt / 260);
-    else fade = Math.max(0, fade - dt / 620);
+    // Fades toward the held level rather than toward zero once a reply
+    // ends -- see HOLD_FADE -- but only if there is a frame to hold; before
+    // the first reply of a session there is nothing behind the chat yet.
+    const fadeTarget = running ? 1 : frames.length ? HOLD_FADE : 0;
+    if (fade < fadeTarget) fade = Math.min(fadeTarget, fade + dt / 260);
+    else fade = Math.max(fadeTarget, fade - dt / 620);
 
     if (!frames.length) return;
 
@@ -438,8 +454,16 @@ export function createStackViz(canvas) {
     // this sits at 0 for every token rate either model reaches, so the
     // captions are simply off -- raise LAYER_MS past ~100 and they fade
     // back in without anything else changing.
-    const dwell = (2 * Math.max(arrivalEma, 80)) / span;
-    detail = clamp((dwell - 70) / 110, 0, 1);
+    // Only the falling tower needs this tradeoff -- a frame held still
+    // after a reply ends is not strobing past at 30 layers/sec, so it gets
+    // every label back regardless of how fast the reply that produced it
+    // was generated.
+    if (running) {
+      const dwell = (2 * Math.max(arrivalEma, 80)) / span;
+      detail = clamp((dwell - 70) / 110, 0, 1);
+    } else {
+      detail = 1;
+    }
     prune();
   }
 
@@ -1129,15 +1153,27 @@ export function createStackViz(canvas) {
     const dt = Math.min(now - last, 80);
     last = now;
     animClock = now;
+    const camBefore = camG;
     step(dt);
     render();
-    // Idle costs nothing: once faded out with no reply in flight the loop
-    // stops entirely rather than clearing an empty canvas 60 times a
-    // second behind a page nobody is generating on.
-    if (!running && fade <= 0.004) {
+    // Idle costs nothing: once settled with no reply in flight the loop
+    // stops entirely rather than redrawing an unchanging frame 60 times a
+    // second behind a page nobody is generating on. "Settled" means both
+    // the fade and the camera (which keeps easing toward the last plate
+    // after stop()) have stopped moving -- checked instead of assumed, so
+    // the loop keeps running through that final glide instead of freezing
+    // mid-motion.
+    const fadeTarget = running ? 1 : frames.length ? HOLD_FADE : 0;
+    const settled = Math.abs(fade - fadeTarget) < 0.004 && Math.abs(camG - camBefore) < 0.001;
+    if (!running && settled) {
       raf = 0;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Only clear when there is truly nothing to hold (no reply has
+      // completed yet, or the viz was switched off) -- otherwise the last
+      // frame stays painted on the canvas, dimmed, as background texture.
+      if (fadeTarget <= 0.004) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
       return;
     }
     raf = requestAnimationFrame(tick);

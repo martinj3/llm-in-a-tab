@@ -501,6 +501,44 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   pointer-events: none;
 }
 
+/* -------------------------------- MODAL -------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(2, 4, 3, 0.72);
+}
+
+.modal-backdrop[hidden] { display: none; }
+
+.modal {
+  max-width: 26rem;
+  padding: 1.25rem 1.4rem;
+  background: #05090a;
+  border: 1px solid rgba(75, 240, 122, 0.35);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.65);
+}
+
+.modal h2 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+  color: var(--phosphor);
+}
+
+.modal p {
+  margin: 0 0 1.1rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+.modal button { width: 100%; }
+
 .composer {
   padding: 0.6rem clamp(0.75rem, 4vw, 2rem) 0.9rem;
   border-top: 1px solid rgba(75, 240, 122, 0.14);
