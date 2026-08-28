@@ -841,9 +841,9 @@ it impossible to ignore. Worse, it got *worse the faster the model ran*,
 which is exactly backwards.
 
 So the descent rate is now the fixed thing and the depth per token is the
-variable one. Each token contributes a run of plates long enough to take
-~110ms each at the measured token time -- one layer at 6 tok/s, four at
-the 360M's ~1 tok/s -- and the next token's run picks up at the layer where
+variable one. Each token contributes a run of layers long enough to take
+`LAYER_MS` each at the measured token time (see the section below for
+where that constant ended up) -- and the next token's run picks up at the layer where
 the last one stopped, wrapping at the end of the model. Nothing is faked:
 every plate is real data from the token whose band follows it, at the layer
 its label names, the token band is captioned with the layer range its run
@@ -906,3 +906,67 @@ deliberately wordy.** The attention block is heads x context, so a short
 prompt dumps frames whose attention plates are 40 columns of fat blocks and
 tells you nothing about the pixel-dense case. Tuning against the short
 dump is the same mistake as tuning against invented statistics.
+
+
+### Turning the descent rate up to 30 layers/sec
+
+Third pass at pacing, and the one that settled what the visualization is
+*for*. It is not a diagram anyone studies; it is meant to convey the sheer
+volume of arithmetic behind each token, and volume reads better fast.
+
+**The constraint was never compute, and it helps to be precise about
+that.** The probe already captures every layer of every token -- the frame
+is `layers * stride` -- so all the data was always there. And the renderer
+only ever draws the ~7 plates inside `DRAW_SPAN`, whatever the camera is
+doing, so cutting more often costs *exactly nothing*: measured 1.74ms/frame
+at 1280x800 both before and after this change. The limit was perception,
+and only perception.
+
+**The governing number is `1000 / layer_dwell`, and token rate is not in
+it.** This is the thing that was easy to get wrong. Because the camera
+descends continuously across tokens, layers per second depends only on the
+dwell; the token rate merely decides how the descent is chopped into runs.
+`PLATE_MS` was replaced by `LAYER_MS` for exactly this reason -- the camera
+cuts in layers, so the constant should be denominated in layers, and
+`runLength` now counts layers and doubles, which also makes the even-plate
+invariant that the cut depends on true by construction instead of by a
+`% 2` dance.
+
+At `LAYER_MS = 33` (two 60Hz frames):
+
+| | run | of model | dwell | layers/sec |
+|---|---|---|---|---|
+| 135M @ 6 tok/s | 5 layers | 17% | 33ms | 30 |
+| 135M @ 3 tok/s | 10 layers | 33% | 33ms | 30 |
+| 360M @ 1 tok/s | 30 layers | 94% | 33ms | 30 |
+| 360M @ 0.7 tok/s | 32 layers | 100% | 45ms | 22 |
+
+The clamp to the model's depth only binds below ~0.7 tok/s. The 360M now
+very nearly wraps its entire stack once per token, where it previously
+showed 12% of it.
+
+**Text does not survive this and everything else does.** Cells, blooms,
+attention fans and the residual trace all shimmer past at 30 layers/sec and
+look like a machine working. 11px monospace replaced every two frames does
+not look fast, it looks like a rendering fault -- which is a bug report
+waiting to happen, not a stylistic choice. So `detail` fades anything made
+of text out as the measured dwell drops under it (0 below 70ms, 1 by
+180ms), and the plate captions and the `sink`/`focus N` callouts are scaled
+by it while the fans, blooms and traces are not. What still carries the
+information: the STACK rail, whose caret and range bracket slide
+continuously rather than being redrawn per cut, and the token band, which
+changes once per *token* and is captioned with its run's layer range
+(`token "The"  L16-L25`).
+
+`detail` is computed from the *measured* dwell rather than from `LAYER_MS`,
+so it comes back on its own when the clamp lengthens the dwell. At 33 it is
+0 for every token rate either model reaches, i.e. captions are simply off;
+push `LAYER_MS` past ~100 and they fade back in with nothing else touched.
+That is the intended knob if this ever wants to be legible again.
+
+**Harness gotcha, second instance.** The canvas is 1x1 until the pane tab
+is *fronted* -- an unfronted tab has no layout. Combined with the earlier
+trap (resizing clears the canvas, and `rAF` is stubbed so nothing redraws
+until you step), the working order is: front, resize, load, step, shoot.
+Get it wrong and you measure a blank 1x1 canvas and conclude the renderer
+is frozen. Both times this cost more than the change being tested.

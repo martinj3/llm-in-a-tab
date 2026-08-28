@@ -46,25 +46,27 @@
 // pacing controller needs fractions of a plate to chase the worker with --
 // and only the rendered position (camV) is quantized.
 //
-// WHY IT DOES NOT SHOW EVERY LAYER OF EVERY TOKEN. It cannot. Thirty
-// layers is sixty plates, and 135M runs at up to 6 tok/s, which is 2.7ms
-// per plate -- a sixth of one 60Hz frame. A camera that honestly visited
-// all of them would cross six plates between two rendered frames, and
-// consecutive frames would show unrelated layers: a strobe, and one that
-// is *worse* the faster the model runs, which is exactly backwards.
+// HOW MUCH OF THE MODEL YOU SEE. All of the data exists: the probe
+// captures every layer of every token, so this is purely a question of
+// display rate, and it is bounded by perception rather than by compute.
+// The renderer only ever draws the ~7 plates inside DRAW_SPAN whatever
+// the camera is doing, at well under a millisecond, so cutting faster
+// costs nothing at all.
 //
-// So the descent rate is the fixed thing and the depth per token is the
-// variable one. Each token contributes a run of plates long enough to
-// take about PLATE_MS each at the measured token time -- one layer per
-// token at 6 tok/s, four or five at the 360M's ~1 tok/s -- and the next
-// token's run picks up at the layer where the last one stopped, wrapping
-// at the end of the model. Nothing is faked: every plate is real data
-// from the token whose band follows it, at the layer its label names, and
-// the STACK rail shows which slice of the model is currently on screen.
-// What you lose is the guarantee that one token means one lap of the
-// tower. What you get is a fall you can actually watch, and the faster
-// the model runs the more of the model streams past per second, which is
-// the right way round.
+// The descent rate is the fixed thing and the depth per token is the
+// variable one. Each token contributes a run of layers long enough to
+// take about LAYER_MS each at the measured token time -- five layers per
+// token at 6 tok/s, thirty at the 360M's ~1 tok/s -- and the next token's
+// run picks up where the last one stopped, wrapping at the end of the
+// model. Nothing is faked: every plate is real data from the token whose
+// band follows it, at the layer the rail points to. What you lose is the
+// guarantee that one token means one lap of the tower; what you get is
+// most of the model streaming past every second.
+//
+// At 30 layers/sec this is explicitly past the point of being readable,
+// which is the brief. It is meant to convey the sheer volume of the
+// arithmetic, and volume reads better fast. The one thing that does not
+// survive the speed is text -- see `detail`.
 //
 // EVERYTHING IS drawImage, NOT fillRect. A plate is painted into a tiny
 // offscreen canvas at one device pixel per value, then blitted with an
@@ -78,13 +80,24 @@ import { NEURON_LUT, ATTN_LUT, COLORS } from "./palette.js";
 // band that cost a slot would leave the camera staring at an empty screen
 // a third of the time.
 const GAP = 0;
-// Target time on screen for one plate. The whole pacing scheme exists to
-// hold this roughly constant whatever the model's token rate. The camera
-// cuts a layer -- two plates -- at a time, so this is half the dwell: the
-// picture holds for 170-330ms across the range of token rates the two
-// models produce, which is long enough to read and short enough to feel
-// like the model is working.
-const PLATE_MS = 110;
+// Target time on screen for one layer -- the unit the camera cuts in.
+// Layers per second is just 1000/this, independent of token rate, because
+// the camera descends continuously across tokens; the token rate only
+// decides how the descent gets chopped into runs.
+//
+// 33ms is two 60Hz frames, i.e. 30 layers/sec. That is deliberately below
+// the ~100ms it takes to read a new image, and the result shimmers rather
+// than reads. That is the point: the visualization is not a diagram you
+// study, it is an impression of how much arithmetic is going past, and at
+// 30 layers/sec a 30-layer model streams by about once a second instead
+// of once every seven. Nothing is faked to get there -- the probe already
+// captures every layer of every token, so this only changes how much of
+// what was already measured gets shown.
+//
+// The cost is legibility, and it is paid explicitly rather than silently:
+// see `detail`, which fades the captions out as the dwell drops under
+// them so the plates shimmer but the text does not strobe.
+const LAYER_MS = 33;
 const EDGE_SLICES = 6; // depth of the extruded side face, in layers
 const SLOPE_Y = 0.05; // grid tips down to the right
 const SLOPE_X = 0.34; // rows lean right as they descend
@@ -180,6 +193,17 @@ export function createStackViz(canvas) {
   // exactly what tests/viz-harness.html does, and it pinned the camera to
   // the bottom of the stack.
   let animClock = 0;
+  // How readable the current descent rate is, 0..1, recomputed from the
+  // measured dwell each frame. Everything made of *text* is scaled by it.
+  //
+  // Cells, blooms, fans and traces can shimmer past at 30 layers/sec and
+  // look like a machine working. Captions cannot: eleven-point monospace
+  // replaced every two frames is not fast text, it is a flickering smear
+  // that reads as a rendering fault. So the annotations fade out as the
+  // dwell drops under what they need, and the STACK rail -- whose caret
+  // slides continuously instead of being redrawn per cut -- is left to say
+  // which layer is on screen. Nothing is hidden that was legible.
+  let detail = 1;
 
   let enabled = true;
   let running = false;
@@ -255,15 +279,20 @@ export function createStackViz(canvas) {
     layoutAttn();
   }
 
-  // How many plates this token's run gets: as many as fit at PLATE_MS
-  // apiece in the time the last token took, minus the slot the token band
-  // costs. Rounded down to a whole number of layers so a run never ends
-  // between a layer's attention and its MLP, and never fewer than one
-  // layer or more than the whole model.
+  // How many plates this token's run gets: as many *layers* as fit at
+  // LAYER_MS apiece in the time the last token took, times two. Counted in
+  // layers rather than plates so a run can never end between a layer's
+  // attention and its MLP -- which is also what keeps plate parity equal
+  // to slot parity, and so what keeps each slot's type fixed under the
+  // camera's two-plate cut.
+  //
+  // Clamped to the model: a token slower than the whole stack takes to
+  // fall through would otherwise ask for more layers than exist. At
+  // LAYER_MS 33 the 360M at ~1 tok/s asks for 30 of its 32 layers, so it
+  // very nearly wraps the entire model once per token.
   function runLength() {
-    const budget = Math.round(arrivalEma / PLATE_MS) - GAP;
-    const even = budget - (budget % 2);
-    return clamp(even, 2, plates);
+    const wanted = Math.round(arrivalEma / LAYER_MS);
+    return clamp(wanted * 2, 2, plates);
   }
 
   function push(msg) {
@@ -371,9 +400,10 @@ export function createStackViz(canvas) {
     const span = newest.count + GAP;
     const behind = (maxG - camG) / span;
     const factor = 1 + Math.max(0, behind - 0.75) * 0.9;
-    // span/arrivalEma is PLATE_MS by construction, give or take the
-    // rounding in runLength(); expressing it this way keeps the camera
-    // locked to the worker rather than to a constant that would drift.
+    // 2*arrivalEma/span is LAYER_MS by construction, give or take the
+    // rounding in runLength() and its clamp to the model's depth;
+    // expressing it this way keeps the camera locked to the worker rather
+    // than to a constant that would drift away from it.
     const speed = (span / Math.max(arrivalEma, 80)) * factor;
     // Parked just short of the newest plate rather than on it. Sitting
     // exactly on the floor puts the bottom third of the screen in the
@@ -397,6 +427,19 @@ export function createStackViz(canvas) {
     // them. Runs are a whole number of layers and always start on an even
     // plate (see runLength), so this parity holds for every frame.
     camV = Math.floor(camG / 2) * 2;
+
+    // Measured rather than derived from LAYER_MS, because the run is
+    // clamped to the model's depth: a token slower than a full fall
+    // through the stack gets a longer real dwell than was asked for, and
+    // the captions should come back on their own when it does.
+    //
+    // Below ~70ms a line of 11px monospace is not slow text, it is a
+    // smear; by ~180ms it is comfortable. At the shipped LAYER_MS of 33
+    // this sits at 0 for every token rate either model reaches, so the
+    // captions are simply off -- raise LAYER_MS past ~100 and they fade
+    // back in without anything else changing.
+    const dwell = (2 * Math.max(arrivalEma, 80)) / span;
+    detail = clamp((dwell - 70) / 110, 0, 1);
     prune();
   }
 
@@ -592,11 +635,17 @@ export function createStackViz(canvas) {
 
     if (!focused) return;
     buildProfile(frame, layer);
+    // The fan stays at any speed: it is shape, not text, and at 30
+    // layers/sec a filament bundle that reaims every cut is the single
+    // best cue that something is being recomputed rather than replayed.
     drawAttentionFan(frame, corners, alpha, s);
-    drawContextMarkers(frame, m, corners, drawCols, rows, alpha);
+    // The markers carry "sink" and "focus N" captions, so they go with the
+    // labels rather than with the fan.
+    if (detail <= 0.02) return;
+    drawContextMarkers(frame, m, corners, drawCols, rows, alpha * detail);
     drawPlateLabel(
       corners,
-      alpha,
+      alpha * detail,
       `L${String(layer).padStart(2, "0")} ATTN`,
       `${cfg.heads}h x ${frame.cols} ctx  ${(cfg.heads * frame.cols).toLocaleString()} weights`,
       COLORS.attnLabel,
@@ -769,11 +818,14 @@ export function createStackViz(canvas) {
     ctx.restore();
 
     if (!focused) return;
+    // Both survive any speed -- the blooms *are* the firing neurons, and
+    // the residual trace redrawing itself every cut is the point.
     drawHotNeurons(frame, layer, m, alpha, wPx / grid.w);
     drawResidualTrace(frame, layer, corners, alpha, s);
+    if (detail <= 0.02) return;
     drawPlateLabel(
       corners,
-      alpha,
+      alpha * detail,
       `L${String(layer).padStart(2, "0")} MLP`,
       compact
         ? `${cfg.mlpCells}n`
