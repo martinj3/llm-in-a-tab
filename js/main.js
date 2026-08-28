@@ -134,10 +134,9 @@ function probBar(ratio, cells) {
   return bar.padEnd(cells, " ");
 }
 
-function renderCandidates({ chosen, items }) {
-  const wide = wideEnough.matches;
-  const count = wide ? 15 : 7;
-  const cells = wide ? 4 : 2;
+// Shared by the live column and the inspector below, which differ only in
+// how many rows they have room for and how wide the bars are.
+function candidateRows({ chosen, items }, { count, cells }) {
   // Every bar is relative to the leader, and the worker sends the list
   // already sorted, so that is items[0] -- guarded anyway because a zero
   // here would put NaN in every row.
@@ -168,8 +167,132 @@ function renderCandidates({ chosen, items }) {
     rows.append(row);
   }
 
-  candidatesEl.replaceChildren(rows);
+  return rows;
 }
+
+function renderCandidates(message) {
+  const wide = wideEnough.matches;
+  candidatesEl.replaceChildren(
+    candidateRows(message, { count: wide ? 15 : 7, cells: wide ? 4 : 2 })
+  );
+}
+
+// ------------------------------ inspector -------------------------------
+// The live column is gone the moment the reply finishes, which is exactly
+// when someone reads the reply and wonders how close a particular word was
+// to being some other word. So each token of the most recent reply keeps
+// the distribution it was drawn from, and asking for it -- hovering with a
+// pointer, tapping on a touchscreen -- puts that column back, next to the
+// word instead of at the edge of the screen.
+//
+// Only the most recent reply: the distributions are ~15 objects per token
+// and a long conversation would accumulate them for every word ever
+// generated, for a question nobody asks about a reply five turns back.
+const inspectorEl = document.getElementById("inspector");
+
+// Long enough to read a dozen rows, short enough that a stray tap does not
+// leave a panel sitting over the text. Touch only -- a pointer dismisses
+// it by moving away, which needs no timer.
+const TAP_LINGER_MS = 10000;
+
+// Keyed by the token's <span>, so a reply dropped from the DOM takes its
+// distributions with it rather than needing to be swept.
+const distributions = new WeakMap();
+
+// The candidates message for a token arrives before the token message that
+// carries its text, and one visible piece can take more than one token
+// (the stream decoder holds a multi-byte character back until it is
+// complete). So they queue here and are handed to the next piece that
+// appears; sets[0] is the draw that produced its first byte, which is the
+// choice the word is actually about.
+let pendingCandidates = [];
+let inspectableBubble = null;
+let inspecting = null;
+let lingerTimer = null;
+
+function hideInspector() {
+  clearTimeout(lingerTimer);
+  lingerTimer = null;
+  inspecting?.classList.remove("inspecting");
+  inspecting = null;
+  inspectorEl.hidden = true;
+}
+
+// Above the token by preference -- a panel below it covers the rest of the
+// line being read. Clamped into the viewport on both axes, because a token
+// near an edge is the common case, not the exception.
+function positionInspector(span) {
+  const gap = 8;
+  const target = span.getBoundingClientRect();
+  const panel = inspectorEl.getBoundingClientRect();
+
+  const left = Math.min(
+    Math.max(gap, target.left + target.width / 2 - panel.width / 2),
+    window.innerWidth - panel.width - gap
+  );
+  let top = target.top - panel.height - gap;
+  if (top < gap) {
+    top = Math.min(target.bottom + gap, window.innerHeight - panel.height - gap);
+  }
+
+  inspectorEl.style.left = `${Math.max(gap, left)}px`;
+  inspectorEl.style.top = `${Math.max(gap, top)}px`;
+}
+
+function showInspector(span, linger) {
+  const sets = distributions.get(span);
+  if (!sets?.length) return;
+
+  if (span !== inspecting) {
+    inspecting?.classList.remove("inspecting");
+    inspecting = span;
+    span.classList.add("inspecting");
+    // Always the full percentages here, unlike the live column: this one
+    // was asked for, and it is not competing with the reply for width.
+    inspectorEl.replaceChildren(
+      candidateRows(sets[0], { count: wideEnough.matches ? 15 : 8, cells: 4 })
+    );
+    // Unhidden before measuring -- a display:none element has no size.
+    inspectorEl.hidden = false;
+    positionInspector(span);
+  }
+
+  clearTimeout(lingerTimer);
+  lingerTimer = linger ? setTimeout(hideInspector, TAP_LINGER_MS) : null;
+}
+
+function tokenAt(event) {
+  const el = event.target instanceof Element ? event.target : null;
+  return el?.closest(".bubble.inspectable .token") ?? null;
+}
+
+// Hover, for pointers. Delegated to the transcript rather than bound per
+// token: a reply is hundreds of spans, and they are created one per token
+// while the page is already busy running a forward pass.
+transcript.addEventListener("pointerover", (event) => {
+  if (event.pointerType !== "mouse") return;
+  const span = tokenAt(event);
+  if (span) showInspector(span, false);
+  else if (!lingerTimer) hideInspector();
+});
+
+transcript.addEventListener("pointerleave", () => {
+  if (!lingerTimer) hideInspector();
+});
+
+// Tap, for touchscreens -- and a click on a pointer, which just pins the
+// panel that hovering already showed. Anywhere else in the transcript
+// dismisses it, so it never has to be waited out.
+transcript.addEventListener("click", (event) => {
+  const span = tokenAt(event);
+  if (span) showInspector(span, true);
+  else hideInspector();
+});
+
+// The panel is positioned against the viewport, so anything that moves the
+// token out from under it invalidates it.
+transcript.addEventListener("scroll", hideInspector, { passive: true });
+window.addEventListener("resize", hideInspector);
 
 function setMem(residentMB) {
   hud.mem.textContent = residentMB ? `mem ${residentMB.toFixed(0)}MB` : "mem --";
@@ -435,6 +558,12 @@ worker.onmessage = (event) => {
       // Clear rather than leave the last reply's final distribution to
       // flash for the ~500ms until the first token of this one arrives.
       candidatesEl.replaceChildren();
+      // The previous reply stops being the one you can ask about the
+      // moment a new one starts, not when it finishes.
+      hideInspector();
+      inspectableBubble?.classList.remove("inspectable");
+      inspectableBubble = null;
+      pendingCandidates = [];
       streamingBubble = addBubble("assistant");
       streamingBubble.classList.add("streaming");
       scrollTranscript();
@@ -447,6 +576,7 @@ worker.onmessage = (event) => {
 
     case "candidates":
       renderCandidates(message);
+      pendingCandidates.push(message);
       break;
 
     case "prefill-done":
@@ -455,18 +585,32 @@ worker.onmessage = (event) => {
       updateCtx(message.seqLen, message.maxCtx);
       break;
 
-    case "token":
+    case "token": {
       if (streamingBubble) {
-        streamingBubble.append(message.text);
+        // A span per token rather than one growing text node, so each
+        // piece of the reply is a thing the pointer can be over. Marked
+        // .token only when it has a distribution to show -- the flushed
+        // tail after the loop ends does not.
+        const span = document.createElement("span");
+        span.textContent = message.text;
+        if (pendingCandidates.length) {
+          span.className = "token";
+          distributions.set(span, pendingCandidates);
+          pendingCandidates = [];
+        }
+        streamingBubble.append(span);
         scrollTranscript();
       }
       updateCtx(message.seqLen, message.maxCtx);
       hud.speed.textContent = `${message.tokensPerSecond.toFixed(2)} tok/s`;
       break;
+    }
 
     case "reply-done": {
       if (streamingBubble) {
         streamingBubble.classList.remove("streaming");
+        inspectableBubble = streamingBubble;
+        streamingBubble.classList.add("inspectable");
         if (message.reason === "stopped") streamingBubble.append(" [stopped]");
         if (message.reason === "budget") streamingBubble.append(" [token limit]");
         streamingBubble = null;

@@ -434,14 +434,18 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
 /* Must stay the complement of renderCandidates' (min-width: 46rem) in
    js/main.js -- that query picks how many cells get drawn, this one
    reserves the room for them, and if they disagree the percentages stop
-   lining up. */
+   lining up.
+
+   Scoped to .candidates: the inspector below shares these row classes but
+   is never squeezed this way, because it was asked for and is allowed to
+   take the width it needs. */
 @media (max-width: 45.99rem) {
-  .candidate-bar { width: 2ch; }
+  .candidates .candidate-bar { width: 2ch; }
   /* The bar is the whole story at this width -- the percentage is what
      made room for it in the padding-right the transcript reserves while
      generating (js/main.js's `count`/`cells` still fetch and compute it,
      just unused here, since it costs nothing to send). */
-  .candidate-prob { display: none; }
+  .candidates .candidate-prob { display: none; }
 }
 
 .candidate-prob { min-width: 3.2em; text-align: right; opacity: 0.7; }
@@ -452,6 +456,49 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 @media (prefers-reduced-motion: reduce) {
   .candidates { transition: none; }
+}
+
+/* ------------------------------ INSPECTOR ------------------------------ */
+
+/* Each token of the most recent reply carries the distribution it was
+   drawn from (js/main.js). Only that reply's spans get .token, so the
+   affordance appears exactly where there is something to show. Underlined
+   rather than boxed or coloured: the reply still has to read as prose,
+   and a hundred tinted words would read as a heat map instead. */
+.bubble.inspectable .token {
+  cursor: help;
+  text-decoration: underline dotted rgba(75, 240, 122, 0.25);
+  text-underline-offset: 0.2em;
+}
+
+.bubble.inspectable .token:hover,
+.bubble.inspectable .token.inspecting {
+  background: rgba(75, 240, 122, 0.16);
+  text-decoration-color: var(--phosphor);
+}
+
+/* position:fixed because it is placed against the viewport from a
+   getBoundingClientRect (positionInspector), and because the transcript
+   scrolls -- an absolutely positioned panel would be carried off with the
+   text. pointer-events:none for the same reason as .candidates, and
+   because a panel that ate the pointer would flicker: the hover it is
+   showing for is on the word underneath it. */
+.inspector {
+  position: fixed;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  max-width: min(22rem, calc(100vw - 1rem));
+  padding: 0.45rem 0.6rem;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--phosphor-dim);
+  background: rgba(4, 12, 6, 0.94);
+  border: 1px solid rgba(75, 240, 122, 0.3);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
 }
 
 .composer {

@@ -83,6 +83,12 @@
          column on top of the reply text it is already announcing. -->
     <div class="candidates" id="candidates" aria-hidden="true"></div>
 
+    <!-- The same readout, on demand, for a token of the finished reply:
+         hover on a pointer, tap on a touchscreen. aria-hidden for the same
+         reason as the live column, and because the reply text it annotates
+         has already been announced. -->
+    <div class="inspector" id="inspector" aria-hidden="true" hidden></div>
+
     <form class="composer" id="composer">
       <div class="sampling" id="sampling" hidden>
         <label><input type="checkbox" id="greedy" checked> greedy</label>
